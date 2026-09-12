@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
@@ -604,11 +604,15 @@ public partial class ScriptService : IScriptService
 
     public static async Task StartGameTask(bool waitForMainUi = true)
     {
+        if (TaskContext.Instance().IsCloudWeb || TaskContext.Instance().Config.GenshinStartConfig.CloudWebEnabled)
+            throw new NotSupportedException("网页云原神首版仅支持首页启动、自动排队、进入与图像识别，脚本和独立任务暂未适配。");
         // 没启动时候，启动截图器
         var homePageViewModel = App.GetService<HomePageViewModel>();
         if (!homePageViewModel!.TaskDispatcherEnabled)
         {
             await homePageViewModel.OnStartTriggerAsync();
+            if (!homePageViewModel.TaskDispatcherEnabled)
+                throw new InvalidOperationException("游戏或截图器未能启动，已停止任务启动等待。");
 
             if (waitForMainUi)
             {

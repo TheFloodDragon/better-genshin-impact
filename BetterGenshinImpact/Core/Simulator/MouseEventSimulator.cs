@@ -1,4 +1,4 @@
-﻿using BetterGenshinImpact.Helpers;
+using BetterGenshinImpact.Helpers;
 using System.Threading;
 using System.Windows;
 using Vanara.PInvoke;
@@ -9,6 +9,7 @@ public class MouseEventSimulator
 {
     public void Move(int x, int y)
     {
+        if (GameTask.TaskContext.Instance().IsCloudWeb) return;
         User32.mouse_event(User32.MOUSEEVENTF.MOUSEEVENTF_ABSOLUTE | User32.MOUSEEVENTF.MOUSEEVENTF_MOVE,
             x * 65535 / PrimaryScreen.WorkingArea.Width, y * 65535 / PrimaryScreen.WorkingArea.Height,
             0, 0);
@@ -16,17 +17,20 @@ public class MouseEventSimulator
 
     public void MoveAbsolute(int x, int y)
     {
+        if (GameTask.TaskContext.Instance().IsCloudWeb) return;
         User32.mouse_event(User32.MOUSEEVENTF.MOUSEEVENTF_ABSOLUTE | User32.MOUSEEVENTF.MOUSEEVENTF_MOVE,
             x, y, 0, 0);
     }
 
     public void LeftButtonDown()
     {
+        if (GameTask.TaskContext.Instance().IsCloudWeb) return;
         User32.mouse_event(User32.MOUSEEVENTF.MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
     }
 
     public void LeftButtonUp()
     {
+        if (GameTask.TaskContext.Instance().IsCloudWeb) return;
         User32.mouse_event(User32.MOUSEEVENTF.MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
     }
 

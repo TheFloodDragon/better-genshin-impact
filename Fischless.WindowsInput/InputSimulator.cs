@@ -1,7 +1,10 @@
-﻿namespace Fischless.WindowsInput;
+namespace Fischless.WindowsInput;
 
 public class InputSimulator : IInputSimulator
 {
+    /// <summary>应用层可暂停桌面输入；返回 false 时不调用系统输入 API。</summary>
+    public static Func<bool>? InputDispatchGuard { get; set; }
+
     public InputSimulator(IKeyboardSimulator keyboardSimulator, IMouseSimulator mouseSimulator, IInputDeviceStateAdaptor inputDeviceStateAdaptor)
     {
         _keyboardSimulator = keyboardSimulator;

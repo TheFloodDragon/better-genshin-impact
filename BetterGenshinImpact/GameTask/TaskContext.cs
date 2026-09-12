@@ -36,6 +36,7 @@ namespace BetterGenshinImpact.GameTask
 
         public void Init(IntPtr hWnd)
         {
+            IsCloudWeb = false;
             GameHandle = hWnd;
             PostMessageSimulator = Simulation.PostMessage(GameHandle);
             SystemInfo = new SystemInfo(hWnd);
@@ -45,6 +46,20 @@ namespace BetterGenshinImpact.GameTask
         }
 
         public bool IsInitialized { get; set; }
+
+        // 在浏览器启动/登录阶段也为 true，用于阻止旧键鼠任务进入桌面输入链路。
+        private volatile bool _isCloudWeb;
+        public bool IsCloudWeb { get => _isCloudWeb; set => _isCloudWeb = value; }
+
+        public void InitCloudWeb(nint hWnd, ISystemInfo systemInfo)
+        {
+            IsCloudWeb = true;
+            GameHandle = hWnd;
+            SystemInfo = systemInfo;
+            PostMessageSimulator = Simulation.PostMessage(hWnd);
+            DpiScale = 1;
+            IsInitialized = true;
+        }
 
         public IntPtr GameHandle { get; set; }
 
@@ -79,6 +94,8 @@ namespace BetterGenshinImpact.GameTask
 
         public List<string> GetGenshinGameProcessNameList()
         {
+            // 通用浏览器进程名不能成为游戏白名单，尤其不能用于 CloseGame。
+            if (IsCloudWeb) return [];
             if (IsInitialized)
             {
                 return [SystemInfo.GameProcessName];

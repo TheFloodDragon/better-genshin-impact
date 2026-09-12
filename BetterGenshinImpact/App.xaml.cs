@@ -181,6 +181,8 @@ public partial class App : Application
                 services.AddSingleton<OverlayMetricsService>();
                 services.AddSingleton<CustomHtmlMaskService>();
                 services.AddSingleton<TaskTriggerDispatcher>();
+                services.AddSingleton<BetterGenshinImpact.Service.CloudGenshin.CloudGenshinService>();
+                services.AddHostedService(sp => sp.GetRequiredService<BetterGenshinImpact.Service.CloudGenshin.CloudGenshinService>());
                 services.AddSingleton<RecognitionTemplateAssetService>();
                 services.AddSingleton<RecognitionTemplateEditorService>();
                 services.AddSingleton<NotificationService>();

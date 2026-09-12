@@ -1,4 +1,4 @@
-﻿using System.Runtime.InteropServices;
+using System.Runtime.InteropServices;
 using Vanara.PInvoke;
 
 namespace Fischless.WindowsInput;
@@ -16,6 +16,8 @@ internal class WindowsInputMessageDispatcher : IInputMessageDispatcher
         {
             throw new ArgumentException("The input array was empty", nameof(inputs));
         }
+
+        if (InputSimulator.InputDispatchGuard?.Invoke() == false) return;
 
         uint num = User32.SendInput((uint)inputs.Length, inputs, Marshal.SizeOf(typeof(User32.INPUT)));
 

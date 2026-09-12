@@ -1,4 +1,4 @@
-﻿using Fischless.WindowsInput;
+using Fischless.WindowsInput;
 using System;
 using BetterGenshinImpact.GameTask.Common;
 using Microsoft.Extensions.Logging;
@@ -8,6 +8,11 @@ namespace BetterGenshinImpact.Core.Simulator;
 
 public class Simulation
 {
+    static Simulation()
+    {
+        InputSimulator.InputDispatchGuard = () => !GameTask.TaskContext.Instance().IsCloudWeb;
+    }
+
     public static InputSimulator SendInput { get; } = new();
 
     public static MouseEventSimulator MouseEvent { get; } = new();

@@ -74,6 +74,57 @@
 
 
 
+        <ui:CardExpander Margin="0,12,0,0" ContentPadding="16" IsExpanded="True">
+            <ui:CardExpander.Header>
+                <StackPanel>
+                    <ui:TextBlock FontTypography="Body" Text="网页云原神（实验性）" />
+                    <ui:TextBlock Text="独立浏览器 · 普通排队 · 自动进入 · 截图识别" TextWrapping="Wrap" />
+                </StackPanel>
+            </ui:CardExpander.Header>
+            <StackPanel>
+                <CheckBox Content="启动时使用网页云原神（不需要安装原神）"
+                          IsEnabled="{Binding CanChangeGameTarget}"
+                          IsChecked="{Binding Config.GenshinStartConfig.CloudWebEnabled, Mode=TwoWay}" />
+                <StackPanel Margin="0,10,0,0"
+                            Visibility="{Binding Config.GenshinStartConfig.CloudWebEnabled, Converter={StaticResource BooleanToVisibilityConverter}}">
+                    <ui:TextBlock Text="首次登录、验证码和协议需手动完成。仅自动选择普通队列，不自动充值；普通队列时长消耗以官网规则为准。窗口请勿最小化。"
+                                  TextWrapping="Wrap" Margin="0,0,0,8" />
+                    <StackPanel IsEnabled="{Binding CanChangeGameTarget}">
+                        <ui:TextBlock Text="浏览器路径（留空自动查找 Edge / Chrome）" />
+                        <DockPanel Margin="0,6,0,10">
+                            <ui:Button DockPanel.Dock="Right" Content="浏览" Command="{Binding SelectCloudBrowserCommand}" Margin="8,0,0,0" />
+                            <TextBox Text="{Binding Config.GenshinStartConfig.CloudBrowserPath, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+                        </DockPanel>
+                        <WrapPanel>
+                            <StackPanel Margin="0,0,16,8">
+                                <ui:TextBlock Text="登录超时（分钟）" />
+                                <TextBox Width="120" HorizontalAlignment="Left" Text="{Binding Config.GenshinStartConfig.CloudLoginTimeoutMinutes, UpdateSourceTrigger=PropertyChanged, ValidatesOnExceptions=True}" />
+                            </StackPanel>
+                            <StackPanel Margin="0,0,16,8">
+                                <ui:TextBlock Text="排队超时（分钟）" />
+                                <TextBox Width="120" HorizontalAlignment="Left" Text="{Binding Config.GenshinStartConfig.CloudQueueTimeoutMinutes, UpdateSourceTrigger=PropertyChanged, ValidatesOnExceptions=True}" />
+                            </StackPanel>
+                            <StackPanel Margin="0,0,16,8">
+                                <ui:TextBlock Text="连接超时（秒）" />
+                                <TextBox Width="120" HorizontalAlignment="Left" Text="{Binding Config.GenshinStartConfig.CloudConnectTimeoutSeconds, UpdateSourceTrigger=PropertyChanged, ValidatesOnExceptions=True}" />
+                            </StackPanel>
+                            <StackPanel Margin="0,0,0,8">
+                                <ui:TextBlock Text="进入超时（分钟）" />
+                                <TextBox Width="120" HorizontalAlignment="Left" Text="{Binding Config.GenshinStartConfig.CloudEnterTimeoutMinutes, UpdateSourceTrigger=PropertyChanged, ValidatesOnExceptions=True}" />
+                            </StackPanel>
+                        </WrapPanel>
+                    </StackPanel>
+                    <ui:TextBlock Text="{Binding CloudStatus}" TextWrapping="Wrap" Margin="0,6" />
+                    <ui:TextBlock Text="首版不会执行旧脚本、战斗、寻路或键鼠宏。请使用下方启动按钮，进入后可预览截图并执行 OCR / 主界面识别。"
+                                  TextWrapping="Wrap" Margin="0,0,0,8" />
+                    <ui:Button HorizontalAlignment="Left" Content="截图并识别" Command="{Binding RecognizeCloudImageCommand}" />
+                    <Image Source="{Binding CloudPreview}" MaxHeight="360" Stretch="Uniform" Margin="0,8,0,0" />
+                    <TextBox Text="{Binding CloudRecognitionText, Mode=OneWay}" IsReadOnly="True" TextWrapping="Wrap"
+                             MaxHeight="140" VerticalScrollBarVisibility="Auto" Margin="0,6,0,0" />
+                </StackPanel>
+            </StackPanel>
+        </ui:CardExpander>
+
         <!--  更好的原神，启动！  -->
         <ui:CardExpander Margin="0,12,0,12"
                          ContentPadding="0"
@@ -112,7 +163,7 @@
                                                  EnableCommand="{Binding StartTriggerCommand}"
                                                  EnableContent="{i18n:T 启动}"
                                                  EnableIcon="{ui:SymbolIcon Play24}"
-                                                 IsChecked="{Binding TaskDispatcherEnabled, Mode=OneWay}" />
+                                                 IsChecked="{Binding IsCaptureOrCloudActive, Mode=OneWay}" />
                         <!--  <ui:Button Command="{Binding StartTriggerCommand}"  -->
                         <!--  Content="启动"  -->
                         <!--  Icon="{ui:SymbolIcon Play24}"  -->

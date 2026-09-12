@@ -9,6 +9,26 @@ namespace BetterGenshinImpact.Core.Config;
 [Serializable]
 public partial class GenshinStartConfig : ObservableObject
 {
+    /// <summary>使用独立浏览器启动网页云原神；旧配置保持本地模式。</summary>
+    [ObservableProperty]
+    private bool _cloudWebEnabled;
+
+    /// <summary>留空自动查找 Microsoft Edge，也可指定 Chrome 可执行文件。</summary>
+    [ObservableProperty]
+    private string _cloudBrowserPath = "";
+
+    [ObservableProperty]
+    private int _cloudLoginTimeoutMinutes = 20;
+
+    [ObservableProperty]
+    private int _cloudQueueTimeoutMinutes = 60;
+
+    [ObservableProperty]
+    private int _cloudConnectTimeoutSeconds = 90;
+
+    [ObservableProperty]
+    private int _cloudEnterTimeoutMinutes = 5;
+
     // /// <summary>
     // ///     自动点击月卡
     // /// </summary>

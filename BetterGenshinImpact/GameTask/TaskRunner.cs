@@ -1,4 +1,4 @@
-﻿using BetterGenshinImpact.Core.Script;
+using BetterGenshinImpact.Core.Script;
 using BetterGenshinImpact.GameTask.AutoGeniusInvokation.Exception;
 
 using BetterGenshinImpact.View;
@@ -47,6 +47,11 @@ public class TaskRunner
     /// <returns></returns>
     public async Task RunCurrentAsync(Func<Task> action, bool resetCancellationContext = true, bool clearCancellationContextOnLockFailure = false)
     {
+        if (TaskContext.Instance().IsCloudWeb)
+        {
+            _logger.LogWarning("网页云原神首版仅支持启动、排队、进入和图像识别，当前自动任务尚未适配。");
+            return;
+        }
         // 加锁
         var hasLock = await TaskSemaphore.WaitAsync(0);
         if (!hasLock)
@@ -126,6 +131,11 @@ public class TaskRunner
 
     public async Task RunSoloTaskAsync(ISoloTask soloTask)
     {
+        if (TaskContext.Instance().IsCloudWeb || TaskContext.Instance().Config.GenshinStartConfig.CloudWebEnabled)
+        {
+            _logger.LogWarning("网页云原神首版尚未适配独立任务，请使用首页启动、截图和图像识别。");
+            return;
+        }
         // 启动等待之前先进行取消操作的初始化，便于在任务开始前终止任务.
         CancellationContext.Instance.Set();
 
@@ -178,6 +188,7 @@ public class TaskRunner
 
     public void End()
     {
+        if (TaskContext.Instance().IsCloudWeb) return;
         if (!TaskContext.Instance().IsInitialized)
         {
             return;

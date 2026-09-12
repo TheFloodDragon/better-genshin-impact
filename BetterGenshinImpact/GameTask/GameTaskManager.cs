@@ -33,6 +33,11 @@ internal class GameTaskManager
     /// <returns></returns>
     public static List<ITaskTrigger> LoadInitialTriggers()
     {
+        if (TaskContext.Instance().IsCloudWeb)
+        {
+            TriggerDictionary = new ConcurrentDictionary<string, ITaskTrigger>();
+            return [];
+        }
         ReloadAssets();
         TriggerDictionary = new ConcurrentDictionary<string, ITaskTrigger>();
 
@@ -80,6 +85,7 @@ internal class GameTaskManager
     /// <param name="externalConfig"></param>
     public static bool AddTrigger(string name, object? externalConfig)
     {
+        if (TaskContext.Instance().IsCloudWeb) return false;
         TriggerDictionary ??= new ConcurrentDictionary<string, ITaskTrigger>();
 
         ITaskTrigger? trigger = null;

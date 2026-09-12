@@ -28,6 +28,7 @@ public class SystemControl
 
     public static nint FindGenshinImpactHandle()
     {
+        if (TaskContext.Instance().IsCloudWeb) return TaskContext.Instance().GameHandle;
         var processNames = TaskContext.Instance().GetGenshinGameProcessNameList();
 
         // 其他设置：窗口类名优先检测（默认关闭，关闭时走原始进程名+MainWindowHandle 路径）
@@ -266,6 +267,7 @@ public class SystemControl
 
     public static bool IsGenshinImpactActiveByProcess()
     {
+        if (TaskContext.Instance().IsCloudWeb) return IsGenshinImpactActive();
         var name = GetActiveProcessName();
         if (string.IsNullOrEmpty(name))
         {
@@ -548,6 +550,11 @@ public class SystemControl
     // }
     public static void CloseGame()
     {
+        if (TaskContext.Instance().IsCloudWeb)
+        {
+            App.GetService<BetterGenshinImpact.Service.CloudGenshin.CloudGenshinService>()?.RequestStop();
+            return;
+        }
         try
         {
             var currentSessionId = Process.GetCurrentProcess().SessionId;

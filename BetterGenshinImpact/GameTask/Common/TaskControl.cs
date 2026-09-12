@@ -276,6 +276,8 @@ public class TaskControl
         if (image == null)
         {
             captureFrame?.Dispose();
+            if (TaskContext.Instance().IsCloudWeb)
+                throw new InvalidOperationException("网页云原神尚未取得有效新帧，请等待游戏画面加载。");
             Logger.LogWarning("截图失败!");
             // 重试3次
             for (var i = 0; i < 3; i++)
@@ -310,6 +312,12 @@ public class TaskControl
     /// <returns></returns>
     public static ImageRegion CaptureToRectArea(bool forceNew = false)
     {
+        if (TaskContext.Instance().IsCloudWeb)
+        {
+            var frame = TaskTriggerDispatcher.GlobalGameCapture.Capture()
+                ?? throw new InvalidOperationException("网页云原神尚未获得有效新帧，请等待进入游戏或恢复浏览器窗口。");
+            return new CaptureContent(frame, 0, 0).CaptureRectArea;
+        }
         var image = CaptureGameImage(TaskTriggerDispatcher.GlobalGameCapture);
         var content = new CaptureContent(image, 0, 0);
         return content.CaptureRectArea;

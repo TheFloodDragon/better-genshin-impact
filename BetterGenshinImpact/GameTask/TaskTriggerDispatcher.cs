@@ -106,6 +106,7 @@ namespace BetterGenshinImpact.GameTask
 
         public void SetTriggers(List<ITaskTrigger> list)
         {
+            if (TaskContext.Instance().IsCloudWeb) return;
             lock (_triggerListLocker)
             {
                 _triggers = list;
@@ -124,6 +125,19 @@ namespace BetterGenshinImpact.GameTask
 
                 return false;
             }
+        }
+
+        public void StartCloudWeb(nint hWnd, IGameCapture capture, Model.ISystemInfo systemInfo)
+        {
+            Stop();
+            GameCapture?.Dispose();
+            GameCapture = capture;
+            TaskContext.Instance().InitCloudWeb(hWnd, systemInfo);
+            GameCapture.Start(hWnd);
+            GameTaskManager.ClearTriggers();
+            _triggers = [];
+            GameLoadingTrigger.GlobalEnabled = false;
+            // 云会话自行以低频生产图像，不启动会产生桌面输入的实时触发器。
         }
 
         public void Start(IntPtr hWnd, CaptureModes mode, int interval = 50)
@@ -216,6 +230,7 @@ namespace BetterGenshinImpact.GameTask
 
         public void Tick(object? sender, EventArgs e)
         {
+            if (TaskContext.Instance().IsCloudWeb) return;
             var hasLock = false;
             var tickMetrics = new DispatcherTickMetrics();
             try

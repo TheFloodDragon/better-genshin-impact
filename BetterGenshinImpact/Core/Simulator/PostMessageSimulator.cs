@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Threading;
 using Vanara.PInvoke;
 
@@ -25,6 +25,15 @@ public class PostMessageSimulator
         _hWnd = hWnd;
     }
 
+    private void PostMessage(uint message, nint wParam, nint lParam = default)
+    {
+        if (!GameTask.TaskContext.Instance().IsCloudWeb)
+            User32.PostMessage(_hWnd, message, wParam, lParam);
+    }
+
+    private void PostMessage(User32.WindowMessage message, nint wParam, nint lParam = default)
+        => PostMessage((uint)message, wParam, lParam);
+
     /// <summary>
     ///     指定位置并按下左键
     /// </summary>
@@ -33,9 +42,9 @@ public class PostMessageSimulator
     public PostMessageSimulator LeftButtonClick(int x, int y)
     {
         IntPtr p = (y << 16) | x;
-        User32.PostMessage(_hWnd, WM_LBUTTONDOWN, IntPtr.Zero, p);
+        PostMessage(WM_LBUTTONDOWN, IntPtr.Zero, p);
         Thread.Sleep(100);
-        User32.PostMessage(_hWnd, WM_LBUTTONUP, IntPtr.Zero, p);
+        PostMessage(WM_LBUTTONUP, IntPtr.Zero, p);
         return this;
     }
 
@@ -46,11 +55,11 @@ public class PostMessageSimulator
     /// <param name="y"></param>
     public PostMessageSimulator LeftButtonClickBackground(int x, int y)
     {
-        User32.PostMessage(_hWnd, User32.WindowMessage.WM_ACTIVATE, 1, 0);
+        PostMessage(User32.WindowMessage.WM_ACTIVATE, 1, 0);
         var p = MakeLParam(x, y);
-        User32.PostMessage(_hWnd, WM_LBUTTONDOWN, 1, p);
+        PostMessage(WM_LBUTTONDOWN, 1, p);
         Thread.Sleep(100);
-        User32.PostMessage(_hWnd, WM_LBUTTONUP, 0, p);
+        PostMessage(WM_LBUTTONUP, 0, p);
         return this;
     }
 
@@ -59,19 +68,19 @@ public class PostMessageSimulator
     public PostMessageSimulator LeftButtonClick()
     {
         IntPtr p = (16 << 16) | 16;
-        User32.PostMessage(_hWnd, WM_LBUTTONDOWN, IntPtr.Zero, p);
+        PostMessage(WM_LBUTTONDOWN, IntPtr.Zero, p);
         Thread.Sleep(100);
-        User32.PostMessage(_hWnd, WM_LBUTTONUP, IntPtr.Zero, p);
+        PostMessage(WM_LBUTTONUP, IntPtr.Zero, p);
         return this;
     }
 
     public PostMessageSimulator LeftButtonClickBackground()
     {
-        User32.PostMessage(_hWnd, User32.WindowMessage.WM_ACTIVATE, 1, 0);
+        PostMessage(User32.WindowMessage.WM_ACTIVATE, 1, 0);
         IntPtr p = (16 << 16) | 16;
-        User32.PostMessage(_hWnd, WM_LBUTTONDOWN, IntPtr.Zero, p);
+        PostMessage(WM_LBUTTONDOWN, IntPtr.Zero, p);
         Thread.Sleep(100);
-        User32.PostMessage(_hWnd, WM_LBUTTONUP, IntPtr.Zero, p);
+        PostMessage(WM_LBUTTONUP, IntPtr.Zero, p);
         return this;
     }
 
@@ -80,7 +89,7 @@ public class PostMessageSimulator
     /// </summary>
     public PostMessageSimulator LeftButtonDown()
     {
-        User32.PostMessage(_hWnd, WM_LBUTTONDOWN, IntPtr.Zero);
+        PostMessage(WM_LBUTTONDOWN, IntPtr.Zero);
         return this;
     }
 
@@ -89,7 +98,7 @@ public class PostMessageSimulator
     /// </summary>
     public PostMessageSimulator LeftButtonUp()
     {
-        User32.PostMessage(_hWnd, WM_LBUTTONUP, IntPtr.Zero);
+        PostMessage(WM_LBUTTONUP, IntPtr.Zero);
         return this;
     }
 
@@ -98,7 +107,7 @@ public class PostMessageSimulator
     /// </summary>
     public PostMessageSimulator RightButtonDown()
     {
-        User32.PostMessage(_hWnd, WM_RBUTTONDOWN, IntPtr.Zero);
+        PostMessage(WM_RBUTTONDOWN, IntPtr.Zero);
         return this;
     }
 
@@ -107,78 +116,78 @@ public class PostMessageSimulator
     /// </summary>
     public PostMessageSimulator RightButtonUp()
     {
-        User32.PostMessage(_hWnd, WM_RBUTTONUP, IntPtr.Zero);
+        PostMessage(WM_RBUTTONUP, IntPtr.Zero);
         return this;
     }
 
     public PostMessageSimulator RightButtonClick()
     {
         IntPtr p = (16 << 16) | 16;
-        User32.PostMessage(_hWnd, WM_RBUTTONDOWN, IntPtr.Zero, p);
+        PostMessage(WM_RBUTTONDOWN, IntPtr.Zero, p);
         Thread.Sleep(100);
-        User32.PostMessage(_hWnd, WM_RBUTTONUP, IntPtr.Zero, p);
+        PostMessage(WM_RBUTTONUP, IntPtr.Zero, p);
         return this;
     }
 
     public PostMessageSimulator KeyPress(User32.VK vk)
     {
-        //User32.PostMessage(_hWnd, User32.WindowMessage.WM_ACTIVATE, 1, 0);
-        User32.PostMessage(_hWnd, User32.WindowMessage.WM_KEYDOWN, (nint)vk, 0x1e0001);
-        User32.PostMessage(_hWnd, User32.WindowMessage.WM_CHAR, (nint)vk, 0x1e0001);
-        User32.PostMessage(_hWnd, User32.WindowMessage.WM_KEYUP, (nint)vk, unchecked((nint)0xc01e0001));
+        //PostMessage(User32.WindowMessage.WM_ACTIVATE, 1, 0);
+        PostMessage(User32.WindowMessage.WM_KEYDOWN, (nint)vk, 0x1e0001);
+        PostMessage(User32.WindowMessage.WM_CHAR, (nint)vk, 0x1e0001);
+        PostMessage(User32.WindowMessage.WM_KEYUP, (nint)vk, unchecked((nint)0xc01e0001));
         return this;
     }
 
     public PostMessageSimulator KeyPress(User32.VK vk, int ms)
     {
-        User32.PostMessage(_hWnd, User32.WindowMessage.WM_KEYDOWN, (nint)vk, 0x1e0001);
+        PostMessage(User32.WindowMessage.WM_KEYDOWN, (nint)vk, 0x1e0001);
         Thread.Sleep(ms);
-        User32.PostMessage(_hWnd, User32.WindowMessage.WM_CHAR, (nint)vk, 0x1e0001);
-        User32.PostMessage(_hWnd, User32.WindowMessage.WM_KEYUP, (nint)vk, unchecked((nint)0xc01e0001));
+        PostMessage(User32.WindowMessage.WM_CHAR, (nint)vk, 0x1e0001);
+        PostMessage(User32.WindowMessage.WM_KEYUP, (nint)vk, unchecked((nint)0xc01e0001));
         return this;
     }
 
     public PostMessageSimulator LongKeyPress(User32.VK vk)
     {
-        User32.PostMessage(_hWnd, User32.WindowMessage.WM_KEYDOWN, (nint)vk, 0x1e0001);
+        PostMessage(User32.WindowMessage.WM_KEYDOWN, (nint)vk, 0x1e0001);
         Thread.Sleep(1000);
-        User32.PostMessage(_hWnd, User32.WindowMessage.WM_CHAR, (nint)vk, 0x1e0001);
-        User32.PostMessage(_hWnd, User32.WindowMessage.WM_KEYUP, (nint)vk, unchecked((nint)0xc01e0001));
+        PostMessage(User32.WindowMessage.WM_CHAR, (nint)vk, 0x1e0001);
+        PostMessage(User32.WindowMessage.WM_KEYUP, (nint)vk, unchecked((nint)0xc01e0001));
         return this;
     }
 
     public PostMessageSimulator KeyDown(User32.VK vk)
     {
-        User32.PostMessage(_hWnd, User32.WindowMessage.WM_KEYDOWN, (nint)vk, 0x1e0001);
+        PostMessage(User32.WindowMessage.WM_KEYDOWN, (nint)vk, 0x1e0001);
         return this;
     }
 
     public PostMessageSimulator KeyUp(User32.VK vk)
     {
-        User32.PostMessage(_hWnd, User32.WindowMessage.WM_KEYUP, (nint)vk, unchecked((nint)0xc01e0001));
+        PostMessage(User32.WindowMessage.WM_KEYUP, (nint)vk, unchecked((nint)0xc01e0001));
         return this;
     }
 
     public PostMessageSimulator KeyPressBackground(User32.VK vk)
     {
-        User32.PostMessage(_hWnd, User32.WindowMessage.WM_ACTIVATE, 1, 0);
-        User32.PostMessage(_hWnd, User32.WindowMessage.WM_KEYDOWN, (nint)vk, 0x1e0001);
-        User32.PostMessage(_hWnd, User32.WindowMessage.WM_CHAR, (nint)vk, 0x1e0001);
-        User32.PostMessage(_hWnd, User32.WindowMessage.WM_KEYUP, (nint)vk, unchecked((nint)0xc01e0001));
+        PostMessage(User32.WindowMessage.WM_ACTIVATE, 1, 0);
+        PostMessage(User32.WindowMessage.WM_KEYDOWN, (nint)vk, 0x1e0001);
+        PostMessage(User32.WindowMessage.WM_CHAR, (nint)vk, 0x1e0001);
+        PostMessage(User32.WindowMessage.WM_KEYUP, (nint)vk, unchecked((nint)0xc01e0001));
         return this;
     }
 
     public PostMessageSimulator KeyDownBackground(User32.VK vk)
     {
-        User32.PostMessage(_hWnd, User32.WindowMessage.WM_ACTIVATE, 1, 0);
-        User32.PostMessage(_hWnd, User32.WindowMessage.WM_KEYDOWN, (nint)vk, 0x1e0001);
+        PostMessage(User32.WindowMessage.WM_ACTIVATE, 1, 0);
+        PostMessage(User32.WindowMessage.WM_KEYDOWN, (nint)vk, 0x1e0001);
         return this;
     }
 
     public PostMessageSimulator KeyUpBackground(User32.VK vk)
     {
-        User32.PostMessage(_hWnd, User32.WindowMessage.WM_ACTIVATE, 1, 0);
-        User32.PostMessage(_hWnd, User32.WindowMessage.WM_KEYUP, (nint)vk, unchecked((nint)0xc01e0001));
+        PostMessage(User32.WindowMessage.WM_ACTIVATE, 1, 0);
+        PostMessage(User32.WindowMessage.WM_KEYUP, (nint)vk, unchecked((nint)0xc01e0001));
         return this;
     }
 
