@@ -69,6 +69,8 @@ public class TpTask
     private const double MapDragFastStepRatio = 0.42d;
     private const double MapDragFastDistanceRatio = 0.85d;
     private const double MapClickSafeMargin = 35d;
+    private const double MapUiForbiddenAreaWidth = 360d;
+    private const double MapUiForbiddenAreaHeight = 430d;
     private const double NearbyMapIconPatternMinSearchRadius = 120d;
     private const double NearbyMapIconPatternMaxSearchRadius = 260d;
     private const double NearbyMapIconPatternNeighborDistanceRatio = 1.3d;
@@ -1090,8 +1092,9 @@ public class TpTask
         var requiredRadius = Math.Max(0, requiredVisibleRadius);
         var edgeMargin = safeMargin + requiredRadius;
 
-        // 屏蔽左上角360x400区域；如果需要识别周围图标，则把目标点周围的可见半径也让出来。
-        if (clickX < 360 * _zoomOutMax1080PRatio + requiredRadius && clickY < 400 * _zoomOutMax1080PRatio + requiredRadius)
+        // 屏蔽左上角 UI 遮挡区域；如果需要识别周围图标，则把目标点周围的可见半径也让出来。
+        if (clickX < MapUiForbiddenAreaWidth * _zoomOutMax1080PRatio + requiredRadius
+            && clickY < MapUiForbiddenAreaHeight * _zoomOutMax1080PRatio + requiredRadius)
         {
             return false;
         }
@@ -1248,6 +1251,11 @@ public class TpTask
             catch (TeleportPanelNotOpenedException e)
             {
                 // 同一视野内点击后未出现面板，重试只会重复点击同一位置。
+                
+                // 抛出异常按下 ESC 退出大地图，避免影响后续路径追踪任务
+                Simulation.SendInput.Keyboard.KeyPress(User32.VK.VK_ESCAPE);
+                await Delay(300, ct);
+                
                 throw;
             }
             catch (TpPointNotActivate e)
@@ -1904,8 +1912,8 @@ public class TpTask
             double dragRatioByX = expectedDeltaX == 0 ? 1 : availableX / Math.Abs(expectedDeltaX);
             double dragRatioByY = expectedDeltaY == 0 ? 1 : availableY / Math.Abs(expectedDeltaY);
             double dragRatio = Math.Min(1, Math.Min(dragRatioByX, dragRatioByY));
-            double forbiddenWidth = 360d * scale;
-            double forbiddenHeight = 400d * scale;
+            double forbiddenWidth = MapUiForbiddenAreaWidth * scale;
+            double forbiddenHeight = MapUiForbiddenAreaHeight * scale;
             double avoidPadding = Math.Max(4d, 6d * scale);
 
             for (var attempt = 0; attempt < 12; attempt++)
@@ -1988,6 +1996,7 @@ public class TpTask
             }
         }
 
+        await Delay(60, ct);
         Simulation.SendInput.Mouse.LeftButtonUp();
         var endCursor = GetCursorPositionInCapture();
         return (sentDeltaX, sentDeltaY, steps, startX, startY, endX, endY, endCursor.X - startCursor.X, endCursor.Y - startCursor.Y);
@@ -2819,7 +2828,7 @@ public class TpTask
             return false;
         }
 
-        return !(x < 360 * _zoomOutMax1080PRatio && y < 400 * _zoomOutMax1080PRatio);
+        return !(x < MapUiForbiddenAreaWidth * _zoomOutMax1080PRatio && y < MapUiForbiddenAreaHeight * _zoomOutMax1080PRatio);
     }
 
     private double GetNearbyMapIconPatternSearchRadius(double nearestNeighborScreenDistance = double.NaN)
