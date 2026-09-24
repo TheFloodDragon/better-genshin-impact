@@ -604,7 +604,7 @@ public partial class ScriptService : IScriptService
 
     public static async Task StartGameTask(bool waitForMainUi = true)
     {
-        if (TaskContext.Instance().IsCloudWeb || TaskContext.Instance().Config.GenshinStartConfig.CloudWebEnabled)
+        if (TaskContext.Instance().IsCloudWeb || (!TaskContext.Instance().IsInitialized && TaskContext.Instance().Config.GenshinStartConfig.CloudWebEnabled))
             throw new NotSupportedException("网页云原神首版仅支持首页启动、自动排队、进入与图像识别，脚本和独立任务暂未适配。");
         // 没启动时候，启动截图器
         var homePageViewModel = App.GetService<HomePageViewModel>();

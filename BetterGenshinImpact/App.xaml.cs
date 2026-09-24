@@ -2,6 +2,7 @@ using System;
 using System.Diagnostics;
 using System.Globalization;
 using System.IO;
+using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Threading;
@@ -323,12 +324,41 @@ public partial class App : Application
 
         TempManager.CleanUp();
 
+        // OnExit 是 async void：首个 await 之后 WPF 可能已继续关闭并终止进程，
+        // 导致后续清理无法执行。云会话取消后不再依赖 UI 调度，因此在此处做有界同步等待，
+        // 确保独立浏览器进程树与 Profile 锁一定被回收。
+        StopCloudSessionOnExit();
+
         await _host.StopAsync();
         _host.Dispose();
         Log.CloseAndFlush();
 
         // 释放控制台窗口
         ConsoleHelper.FreeConsoleWindow();
+    }
+
+    /// <summary>
+    /// 退出阶段回收网页云原神会话。取消后的会话循环不再需要 UI 调度，
+    /// 因此这里允许有界同步等待；超时也不阻断关闭流程。
+    /// </summary>
+    private void StopCloudSessionOnExit()
+    {
+        var cloudService = GetService<BetterGenshinImpact.Service.CloudGenshin.CloudGenshinService>();
+        if (cloudService is not { IsRunning: true })
+        {
+            return;
+        }
+
+        try
+        {
+            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+            cloudService.StopSessionAsync(timeout.Token).GetAwaiter().GetResult();
+        }
+        catch (Exception ex)
+        {
+            // 浏览器进程树与 Profile 锁仍由会话自身的释放逻辑兜底回收。
+            ConsoleHelper.WriteLine($"停止网页云原神会话时出现异常：{ex.Message}");
+        }
     }
 
     /// <summary>

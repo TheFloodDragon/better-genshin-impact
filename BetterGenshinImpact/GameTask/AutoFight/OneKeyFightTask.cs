@@ -1,4 +1,4 @@
-﻿using BetterGenshinImpact.Core.Config;
+using BetterGenshinImpact.Core.Config;
 using BetterGenshinImpact.GameTask.AutoFight.Model;
 using BetterGenshinImpact.GameTask.AutoFight.Script;
 using BetterGenshinImpact.Model;
@@ -26,6 +26,9 @@ public class OneKeyFightTask : Singleton<OneKeyFightTask>
     private Dictionary<string, List<CombatCommand>>? _avatarMacros;
     private CancellationTokenSource? _cts = null;
     private Task? _fightTask;
+    private readonly object _lifecycleLock = new();
+    private volatile bool _cloudSuspended;
+    public bool IsCloudSuspended => _cloudSuspended;
 
     private volatile bool _isKeyDown = false;
     private int _activeMacroPriority = -1;
@@ -37,7 +40,54 @@ public class OneKeyFightTask : Singleton<OneKeyFightTask>
     private readonly HashSet<string> _pressedKeys = new(StringComparer.OrdinalIgnoreCase);
     private readonly HashSet<string> _pressedMouseKeys = new(StringComparer.OrdinalIgnoreCase);
 
+    /// <summary>切换云模式前先禁止新宏并等待旧宏结束，在桌面输入防护开启前释放按键。</summary>
+    public async Task SuspendForCloudAsync()
+    {
+        Task? running;
+        CancellationTokenSource? cancellation;
+        lock (_lifecycleLock)
+        {
+            _cloudSuspended = true;
+            _isKeyDown = false;
+            running = _fightTask;
+            cancellation = _cts;
+        }
+        cancellation?.Cancel();
+        try { if (running != null) await running.ConfigureAwait(false); }
+        catch (OperationCanceledException) { }
+        catch (Exception ex)
+        {
+            // 宏自身的失败不能阻断云模式切换；关键是等它真正结束并释放按键。
+            Logger.LogDebug(ex, "等待一键宏结束时出现异常");
+        }
+        finally
+        {
+            ReleasePressedMacroKeys();
+            lock (_lifecycleLock)
+            {
+                if (ReferenceEquals(_cts, cancellation))
+                {
+                    _cts = null;
+                    _fightTask = null;
+                    cancellation?.Dispose();
+                }
+            }
+        }
+    }
+
+    public void ResumeAfterCloud() => _cloudSuspended = false;
+
     public void KeyDown()
+    {
+        lock (_lifecycleLock)
+        {
+            // 云模式下不启动任何桌面宏；底层输入防护只是丢弃输入，不代表任务已停止。
+            if (_cloudSuspended || TaskContext.Instance().IsCloudWeb) return;
+            KeyDownCore();
+        }
+    }
+
+    private void KeyDownCore()
     {
         if (_isKeyDown || !IsEnabled())
         {
@@ -86,15 +136,16 @@ public class OneKeyFightTask : Singleton<OneKeyFightTask>
     public void KeyUp()
     {
         _isKeyDown = false;
-        if (!IsEnabled())
+        // 云模式或挂起期间仍要执行取消与释放，避免残留按下状态；只是不再启动新宏。
+        if (!IsEnabled() && !_cloudSuspended)
         {
             return;
         }
 
-        if (IsHoldOnMode() || IsHoldFinishMode())
+        if (_cloudSuspended || IsHoldOnMode() || IsHoldFinishMode())
         {
             _cts?.Cancel();
-            if (IsHoldOnMode())
+            if (_cloudSuspended || IsHoldOnMode())
             {
                 // 新一键宏允许指令保持按下状态，松开热键时需要立即释放残留按键。
                 ReleasePressedMacroKeys();

@@ -1,4 +1,4 @@
-﻿using BetterGenshinImpact.Core.Config;
+using BetterGenshinImpact.Core.Config;
 using BetterGenshinImpact.GameTask;
 using BetterGenshinImpact.GameTask.AutoFight;
 using BetterGenshinImpact.Service.I18n;
@@ -213,7 +213,27 @@ public partial class HotKeySettingModel : ObservableObject
 
     private bool ShouldBlockGlobalRegister()
     {
-        return HotKeyType == HotKeyTypeEnum.GlobalRegister && ChatUiHotkeyGuard.ShouldBlockHotkey(ConfigPropertyName);
+        return ShouldBlockCloudHotkey(ConfigPropertyName, TaskContext.Instance().IsCloudWeb || OneKeyFightTask.Instance.IsCloudSuspended)
+            || (HotKeyType == HotKeyTypeEnum.GlobalRegister && ChatUiHotkeyGuard.ShouldBlockHotkey(ConfigPropertyName));
+    }
+
+    /// <summary>
+    /// 云模式下只放行不操作游戏的热键。底层输入防护只是丢弃桌面输入，
+    /// 若放行游戏操作热键，旧任务仍会启动，并可能在云会话结束后恢复发送输入。
+    /// </summary>
+    internal static bool ShouldBlockCloudHotkey(string? configPropertyName, bool cloudActive)
+    {
+        if (!cloudActive || string.IsNullOrEmpty(configPropertyName)) return false;
+        return configPropertyName switch
+        {
+            nameof(HotKeyConfig.BgiEnabledHotkey) => false,
+            nameof(HotKeyConfig.CancelTaskHotkey) => false,
+            nameof(HotKeyConfig.SuspendHotkey) => false,
+            nameof(HotKeyConfig.TakeScreenshotHotkey) => false,
+            nameof(HotKeyConfig.LogBoxDisplayHotkey) => false,
+            nameof(HotKeyConfig.OverlayMetricsDisplayHotkey) => false,
+            _ => true
+        };
     }
 
     private void ResetBlockedKeyUpState()

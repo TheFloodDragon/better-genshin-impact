@@ -29,6 +29,10 @@ public partial class GenshinStartConfig : ObservableObject
     [ObservableProperty]
     private int _cloudEnterTimeoutMinutes = 5;
 
+    /// <summary>暂态连接错误及已知安全按钮的最大重试次数（0～5），不重试账号提交或验证码。</summary>
+    [ObservableProperty]
+    private int _cloudMaxRetryAttempts = 2;
+
     // /// <summary>
     // ///     自动点击月卡
     // /// </summary>

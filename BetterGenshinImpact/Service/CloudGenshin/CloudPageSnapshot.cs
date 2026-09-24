@@ -8,13 +8,15 @@ namespace BetterGenshinImpact.Service.CloudGenshin;
 public enum CloudPageState
 {
     Unknown, Navigating, WaitingForLogin, AgreementRequired, Lobby, QueueSelection, Queuing,
-    Connecting, Streaming, TimeExhausted, Maintenance, Disconnected
+    Connecting, Streaming, TimeExhausted, Maintenance, Disconnected,
+    // 仅追加枚举值，保持既有序列化及调用方的数值兼容。
+    LoginRequired, VerificationRequired, AuthorizationRequired, LoginFailed, RecoverableError, UnsupportedBrowser
 }
 
 [JsonConverter(typeof(StringEnumConverter))]
 public enum CloudPageAction
 {
-    None, StartGame, SelectNormalQueue, ConfirmEnter, DismissReward
+    None, StartGame, SelectNormalQueue, ConfirmEnter, DismissReward, OpenLogin, RetryLogin, RetryConnection
 }
 
 public sealed record CloudPageRect(double X, double Y, double Width, double Height)
@@ -32,6 +34,7 @@ public sealed class CloudPageSnapshot
     public CloudPageState State { get; init; }
     public CloudPageAction Action { get; init; }
     public bool ActionVerified { get; init; }
+    public bool HasLoginFrame { get; init; }
     public string Message { get; init; } = "";
     public CloudPageRect? ActionBounds { get; init; }
     public CloudPageRect? GameBounds { get; init; }

@@ -131,7 +131,7 @@ public class TaskRunner
 
     public async Task RunSoloTaskAsync(ISoloTask soloTask)
     {
-        if (TaskContext.Instance().IsCloudWeb || TaskContext.Instance().Config.GenshinStartConfig.CloudWebEnabled)
+        if (TaskContext.Instance().IsCloudWeb || (!TaskContext.Instance().IsInitialized && TaskContext.Instance().Config.GenshinStartConfig.CloudWebEnabled))
         {
             _logger.LogWarning("网页云原神首版尚未适配独立任务，请使用首页启动、截图和图像识别。");
             return;

@@ -1,5 +1,6 @@
 using Newtonsoft.Json.Linq;
 using System;
+using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -19,6 +20,14 @@ public interface ICloudBrowser : IAsyncDisposable
     Task<byte[]> CaptureScreenshotAsync(CancellationToken cancellationToken);
     Task ClickAsync(double cssX, double cssY, CancellationToken cancellationToken);
 }
+
+/// <summary>可选的只读账号框架探测能力，不改变现有 ICloudBrowser 实现的契约。</summary>
+internal interface ICloudLoginInspector
+{
+    Task<JToken?> InspectLoginFrameAsync(string expression, CancellationToken cancellationToken);
+}
+
+internal sealed class CloudBrowserTransientException(string message) : IOException(message) { }
 
 public sealed record CloudBrowserOptions(
     string BrowserPath,

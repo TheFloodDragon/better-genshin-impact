@@ -87,7 +87,7 @@
                           IsChecked="{Binding Config.GenshinStartConfig.CloudWebEnabled, Mode=TwoWay}" />
                 <StackPanel Margin="0,10,0,0"
                             Visibility="{Binding Config.GenshinStartConfig.CloudWebEnabled, Converter={StaticResource BooleanToVisibilityConverter}}">
-                    <ui:TextBlock Text="首次登录、验证码和协议需手动完成。仅自动选择普通队列，不自动充值；普通队列时长消耗以官网规则为准。窗口请勿最小化。"
+                    <ui:TextBlock Text="自动打开官方登录入口。首次密码/短信/扫码登录、验证码及授权需在浏览器中完成，后续复用独立登录态。仅自动选择普通队列，不充值或代为同意协议；时长消耗以官网为准。窗口请勿最小化。"
                                   TextWrapping="Wrap" Margin="0,0,0,8" />
                     <StackPanel IsEnabled="{Binding CanChangeGameTarget}">
                         <ui:TextBlock Text="浏览器路径（留空自动查找 Edge / Chrome）" />

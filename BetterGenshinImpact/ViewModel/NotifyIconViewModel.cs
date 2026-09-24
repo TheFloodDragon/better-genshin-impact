@@ -14,6 +14,7 @@ using System.Windows;
 using System.Windows.Interop;
 using BetterGenshinImpact.Model;
 using BetterGenshinImpact.Service.ChildSession;
+using BetterGenshinImpact.Service.CloudGenshin;
 using BetterGenshinImpact.Service.Instance;
 using BetterGenshinImpact.View.Windows;
 using Vanara.PInvoke;
@@ -64,6 +65,8 @@ public partial class NotifyIconViewModel : ObservableObject
             return;
         }
 
+        // 先发出取消信号，让独立浏览器尽早开始退出；实际等待在 App.OnExit 中完成。
+        App.GetService<CloudGenshinService>()?.RequestStop();
         App.GetService<IConfigService>()?.Save();
         Application.Current.Shutdown();
     }

@@ -3,6 +3,7 @@ using BetterGenshinImpact.Core.Monitor;
 using BetterGenshinImpact.Core.Recognition.ONNX;
 using BetterGenshinImpact.Core.Script;
 using BetterGenshinImpact.GameTask;
+using BetterGenshinImpact.GameTask.AutoFight;
 using BetterGenshinImpact.GameTask.AutoFishing;
 using BetterGenshinImpact.Genshin.Paths;
 using BetterGenshinImpact.Helpers;
@@ -81,6 +82,7 @@ public partial class HomePageViewModel : ViewModel, IDisposable
     private CancellationTokenSource? _cloudStartCancellation;
     private bool _cloudTaskLockHeld;
     private bool _cloudStartFlowActive;
+    private bool _cloudEndedDuringStart;
     private int _cloudGeneration;
 
     [ObservableProperty] [NotifyCanExecuteChangedFor(nameof(StartTriggerCommand))]
@@ -313,13 +315,20 @@ public partial class HomePageViewModel : ViewModel, IDisposable
         {
             if (_disposed || generation != _cloudGeneration) return;
             CloudStatus = status.Message;
-            if (status.Ended && !_cloudStartFlowActive) FinishCloudSession();
+            if (status.Ended)
+            {
+                _cloudEndedDuringStart = true;
+                if (!_cloudStartFlowActive) FinishCloudSession();
+            }
         });
     }
 
     private void FinishCloudSession()
     {
-        if (!TaskContext.Instance().IsCloudWeb && _cloudSystemInfo == null) return;
+        // 放在提前返回之前：任何进入本方法的路径都必须解除宏挂起，
+        // 否则一键宏会在云会话结束后被永久禁用。
+        OneKeyFightTask.Instance.ResumeAfterCloud();
+        if (!TaskContext.Instance().IsCloudWeb && _cloudSystemInfo == null && !_cloudTaskLockHeld) return;
         _taskDispatcher.Stop();
         TaskDispatcherEnabled = false;
         IsCloudStarting = false;
@@ -349,17 +358,23 @@ public partial class HomePageViewModel : ViewModel, IDisposable
             }
             _cloudTaskLockHeld = true;
             _cloudStartFlowActive = true;
+            _cloudEndedDuringStart = false;
             Interlocked.Increment(ref _cloudGeneration);
             _cloudStartCancellation = new CancellationTokenSource();
             IsCloudStarting = true;
-            TaskContext.Instance().IsCloudWeb = true;
-            _ = Core.Simulator.Simulation.SendInput; // 安装应用层桌面输入防护。
-            _mouseKeyMonitor.Unsubscribe();
             CloudPreview = null;
             CloudRecognitionText = "";
             return true;
         });
         if (!accepted) return;
+        // 先终止残留的一键宏并释放按键，再进入云模式；输入防护只丢弃输入，不会停止已在运行的宏。
+        await OneKeyFightTask.Instance.SuspendForCloudAsync();
+        await Application.Current.Dispatcher.InvokeAsync(() =>
+        {
+            TaskContext.Instance().IsCloudWeb = true;
+            _ = Core.Simulator.Simulation.SendInput; // 安装应用层桌面输入防护。
+            _mouseKeyMonitor.Unsubscribe();
+        });
         var generation = _cloudGeneration;
         var ct = _cloudStartCancellation!.Token;
         Exception? failure = null;
@@ -396,7 +411,8 @@ public partial class HomePageViewModel : ViewModel, IDisposable
                     if (generation != _cloudGeneration) return;
                     _cloudStartFlowActive = false;
                     IsCloudStarting = false;
-                    if (ended) FinishCloudSession();
+                    // 会话可能在本次收尾排队期间才结束，Ended 通知会被启动标志挡下，这里补一次判定。
+                    if (ended || _cloudEndedDuringStart || !_cloudService.IsRunning) FinishCloudSession();
                 });
             }
         }

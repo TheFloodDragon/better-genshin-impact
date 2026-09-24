@@ -37,7 +37,8 @@ public sealed class CloudEntryDeadline
         CheckTimeout(_phase);
         var phase = state switch
         {
-            CloudPageState.WaitingForLogin or CloudPageState.AgreementRequired => "登录/人工确认",
+            CloudPageState.LoginRequired or CloudPageState.WaitingForLogin or CloudPageState.AgreementRequired
+                or CloudPageState.VerificationRequired or CloudPageState.AuthorizationRequired or CloudPageState.LoginFailed => "登录/人工确认",
             CloudPageState.Lobby or CloudPageState.QueueSelection or CloudPageState.Queuing => "排队",
             CloudPageState.Streaming => "游戏内进入",
             CloudPageState.Connecting => "云端加载",

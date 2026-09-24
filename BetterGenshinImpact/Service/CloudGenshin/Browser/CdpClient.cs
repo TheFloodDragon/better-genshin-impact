@@ -68,14 +68,14 @@ public sealed class CdpClient : IAsyncDisposable
         finally { EndOperation(); }
     }
 
-    public async Task<JObject> SendAsync(string method, JObject? parameters, CancellationToken cancellationToken)
+    public async Task<JObject> SendAsync(string method, JObject? parameters, CancellationToken cancellationToken, string? sessionId = null)
     {
         BeginOperation();
-        try { return await SendCoreAsync(method, parameters, cancellationToken).ConfigureAwait(false); }
+        try { return await SendCoreAsync(method, parameters, cancellationToken, sessionId).ConfigureAwait(false); }
         finally { EndOperation(); }
     }
 
-    private async Task<JObject> SendCoreAsync(string method, JObject? parameters, CancellationToken cancellationToken)
+    private async Task<JObject> SendCoreAsync(string method, JObject? parameters, CancellationToken cancellationToken, string? sessionId)
     {
         ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
         if (!IsConnected) throw new IOException("云游戏浏览器调试连接已断开。 ");
@@ -87,6 +87,7 @@ public sealed class CdpClient : IAsyncDisposable
         try
         {
             var request = new JObject { ["id"] = id, ["method"] = method, ["params"] = parameters ?? new JObject() };
+            if (sessionId != null) request["sessionId"] = sessionId;
             var bytes = Encoding.UTF8.GetBytes(request.ToString(Formatting.None));
             await _sendLock.WaitAsync(linked.Token).ConfigureAwait(false);
             try
@@ -130,7 +131,7 @@ public sealed class CdpClient : IAsyncDisposable
                 message.SetLength(0);
                 if (payload["id"]?.Value<long>() is not { } id || !_pending.TryRemove(id, out var completion)) continue;
                 if (payload["error"] is JObject error)
-                    completion.TrySetException(new IOException($"浏览器命令失败：{error["message"]?.Value<string>()}"));
+                    completion.TrySetException(CreateCommandException(error));
                 else
                     completion.TrySetResult(payload["result"] as JObject ?? new JObject());
             }
@@ -147,6 +148,16 @@ public sealed class CdpClient : IAsyncDisposable
         }
     }
 
+    internal static IOException CreateCommandException(JObject error)
+    {
+        var message = error["message"]?.Value<string>() ?? "";
+        if (message.Contains("Execution context was destroyed", StringComparison.OrdinalIgnoreCase)
+            || message.Contains("Cannot find context", StringComparison.OrdinalIgnoreCase)
+            || message.Contains("Cannot find execution context", StringComparison.OrdinalIgnoreCase))
+            return new CloudBrowserTransientException("浏览器正在切换页面，等待执行上下文恢复。");
+        // CDP 原始错误可能夹带页面 URL，不把认证查询参数或脚本内容写入日志。
+        return new IOException($"浏览器命令失败（CDP {error["code"]?.Value<int>() ?? 0}），请检查浏览器连接或版本。");
+    }
     public ValueTask DisposeAsync()
     {
         lock (_lifecycleLock)
