@@ -27,6 +27,7 @@ public sealed class CloudGenshinService : IHostedService, IDisposable, IAsyncDis
     private readonly Func<ImageRegion, bool> _isInMainUi;
     private readonly Func<ImageRegion, (double X, double Y)?> _findEnterPoint;
     private CancellationTokenSource? _cancellation;
+    private CancellationToken _sessionOwner;
     private Task _runTask = Task.CompletedTask;
     private string _lastStatus = "";
     private bool _lastReportedReady;
@@ -80,6 +81,7 @@ public sealed class CloudGenshinService : IHostedService, IDisposable, IAsyncDis
             _lastStatus = "";
             _lastReportedReady = false;
             _cancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            _sessionOwner = cancellationToken;
             var cancellation = _cancellation;
             _runTask = Task.Run(() => RunAsync(options, timeouts, autoEnter, retries, attach, ready, cancellation));
         }
@@ -107,6 +109,21 @@ public sealed class CloudGenshinService : IHostedService, IDisposable, IAsyncDis
         lock (_sync) { cancellation = _cancellation; run = _runTask; }
         Cancel(cancellation);
         await run.WaitAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>迟到的启动收尾只能停止自己拥有的会话，不能取消后续新会话。</summary>
+    internal async Task StopSessionForOwnerAsync(CancellationToken owner)
+    {
+        Task run;
+        CancellationTokenSource? cancellation;
+        lock (_sync)
+        {
+            if (_sessionOwner != owner) return;
+            cancellation = _cancellation;
+            run = _runTask;
+        }
+        Cancel(cancellation);
+        await run.ConfigureAwait(false);
     }
 
     private Task DelayAsync(TimeSpan duration, CancellationToken ct) => Task.Delay(duration, _clock, ct);

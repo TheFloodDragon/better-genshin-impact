@@ -49,6 +49,7 @@ using System.Windows.Controls;
 using System.Windows.Interop;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
+using System.Windows.Threading;
 using Windows.System;
 using Wpf.Ui.Controls;
 using Wpf.Ui.Violeta.Controls;
@@ -79,10 +80,7 @@ public partial class HomePageViewModel : ViewModel, IDisposable
     public bool CanChangeGameTarget => !IsCaptureOrCloudActive;
     private readonly CloudGenshinService _cloudService;
     private CloudSystemInfo? _cloudSystemInfo;
-    private CancellationTokenSource? _cloudStartCancellation;
-    private bool _cloudTaskLockHeld;
-    private bool _cloudStartFlowActive;
-    private bool _cloudEndedDuringStart;
+    private CloudStartOperation? _cloudStartOperation;
     private int _cloudGeneration;
 
     [ObservableProperty] [NotifyCanExecuteChangedFor(nameof(StartTriggerCommand))]
@@ -157,6 +155,10 @@ public partial class HomePageViewModel : ViewModel, IDisposable
             {
                 OnClosed();
             }
+            else if (msg.PropertyName == "CancelCloudSession")
+            {
+                RequestCloudStop();
+            }
             else if (msg.PropertyName == "SwitchTriggerStatus")
             {
                 if (IsCaptureOrCloudActive)
@@ -228,8 +230,6 @@ public partial class HomePageViewModel : ViewModel, IDisposable
         _taskDispatcher.UiTaskStopTickEvent -= OnUiTaskStopTick;
         _taskDispatcher.UiTaskStartTickEvent -= OnUiTaskStartTick;
         _cloudService.StatusChanged -= OnCloudStatusChanged;
-        _cloudSystemInfo?.Dispose();
-        _cloudSystemInfo = null;
         WeakReferenceMessenger.Default.UnregisterAll(this);
         _mouseKeyMonitor.Dispose();
         GC.SuppressFinalize(this);
@@ -307,114 +307,210 @@ public partial class HomePageViewModel : ViewModel, IDisposable
 
     private bool CanStartTrigger() => StartButtonEnabled && !IsCloudStarting;
 
+    private bool IsCurrentCloudStart(CloudStartOperation operation)
+        => ReferenceEquals(Volatile.Read(ref _cloudStartOperation), operation);
+
     private void OnCloudStatusChanged(object? sender, CloudSessionStatus status)
     {
+        var operation = Volatile.Read(ref _cloudStartOperation);
+        if (status.Ended && operation != null)
+        {
+            operation.MarkEnded();
+            // 即使窗口已关闭，也不能依赖一条将不再执行的 UI 消息释放任务锁。
+            if (!operation.IsPreparing) _ = FinishCloudSessionAsync(operation);
+        }
         if (_disposed || Application.Current?.Dispatcher.HasShutdownStarted != false) return;
         var generation = Volatile.Read(ref _cloudGeneration);
         UIDispatcherHelper.BeginInvoke(() =>
         {
-            if (_disposed || generation != _cloudGeneration) return;
-            CloudStatus = status.Message;
-            if (status.Ended)
-            {
-                _cloudEndedDuringStart = true;
-                if (!_cloudStartFlowActive) FinishCloudSession();
-            }
+            if (!_disposed && generation == _cloudGeneration) CloudStatus = status.Message;
         });
     }
 
-    private void FinishCloudSession()
+    private Task InvokeCloudUiAsync(CloudStartOperation operation, Action action)
     {
-        // 放在提前返回之前：任何进入本方法的路径都必须解除宏挂起，
-        // 否则一键宏会在云会话结束后被永久禁用。
-        OneKeyFightTask.Instance.ResumeAfterCloud();
-        if (!TaskContext.Instance().IsCloudWeb && _cloudSystemInfo == null && !_cloudTaskLockHeld) return;
-        _taskDispatcher.Stop();
-        TaskDispatcherEnabled = false;
-        IsCloudStarting = false;
-        TaskContext.Instance().IsInitialized = false;
-        TaskContext.Instance().IsCloudWeb = false;
-        TaskContext.Instance().GameHandle = IntPtr.Zero;
-        _cloudSystemInfo?.Dispose();
-        _cloudSystemInfo = null;
-        _cloudStartCancellation?.Dispose();
-        _cloudStartCancellation = null;
-        if (_cloudTaskLockHeld)
+        var dispatcher = Application.Current?.Dispatcher;
+        if (_disposed || dispatcher == null || dispatcher.HasShutdownStarted || dispatcher.HasShutdownFinished)
+            throw new OperationCanceledException(operation.Token);
+        return dispatcher.InvokeAsync(() =>
         {
-            _cloudTaskLockHeld = false;
-            GameTask.Common.TaskControl.TaskSemaphore.Release();
+            operation.Token.ThrowIfCancellationRequested();
+            if (_disposed || !IsCurrentCloudStart(operation)) throw new OperationCanceledException(operation.Token);
+            action();
+        }, DispatcherPriority.Normal, operation.Token).Task;
+    }
+
+    private Task FinishCloudSessionAsync(CloudStartOperation operation)
+        => operation.CleanupAsync(async () =>
+        {
+            try
+            {
+                var dispatcher = Application.Current?.Dispatcher;
+                if (!_disposed && dispatcher is { HasShutdownStarted: false, HasShutdownFinished: false })
+                {
+                    try
+                    {
+                        await dispatcher.InvokeAsync(() => FinishCloudSession(operation, updateUi: true)).Task.ConfigureAwait(false);
+                        return;
+                    }
+                    catch (OperationCanceledException) when (dispatcher.HasShutdownStarted || dispatcher.HasShutdownFinished)
+                    {
+                        // Dispatcher 在检查之后关闭：改为不触碰 WPF 控件的资源收尾。
+                    }
+                }
+                FinishCloudSession(operation, updateUi: false);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "网页云原神本地资源收尾失败");
+            }
+            finally
+            {
+                Interlocked.CompareExchange(ref _cloudStartOperation, null, operation);
+            }
+        });
+
+    private void FinishCloudSession(CloudStartOperation operation, bool updateUi)
+    {
+        if (!IsCurrentCloudStart(operation)) return;
+        try
+        {
+            // 先停安全监听，最后才恢复桌面宏，避免旧长按回调跨越模式边界。
+            if (!_disposed) _mouseKeyMonitor.Unsubscribe();
+            if (updateUi) _taskDispatcher.Stop();
+            else _cloudService.Capture.Stop();
+        }
+        finally
+        {
+            try { Interlocked.Exchange(ref _cloudSystemInfo, null)?.Dispose(); }
+            finally
+            {
+                TaskContext.Instance().IsInitialized = false;
+                TaskContext.Instance().IsCloudWeb = false;
+                TaskContext.Instance().GameHandle = IntPtr.Zero;
+                try
+                {
+                    if (updateUi)
+                    {
+                        TaskDispatcherEnabled = false;
+                        IsCloudStarting = false;
+                        if (operation.Token.IsCancellationRequested) CloudStatus = "网页云原神已取消";
+                    }
+                    else
+                    {
+                        _taskDispatcherEnabled = false;
+                        _isCloudStarting = false;
+                    }
+                }
+                finally { OneKeyFightTask.Instance.ResumeAfterCloud(); }
+            }
+        }
+    }
+
+    private async Task StopCloudSessionAndFinishAsync(CloudStartOperation operation)
+    {
+        try { await _cloudService.StopSessionForOwnerAsync(operation.Token).ConfigureAwait(false); }
+        catch (Exception ex) { _logger.LogWarning(ex, "停止网页云原神会话失败"); }
+        finally { await FinishCloudSessionAsync(operation).ConfigureAwait(false); }
+    }
+
+    private void RequestCloudStop()
+    {
+        var operation = Volatile.Read(ref _cloudStartOperation);
+        try { operation?.RequestStop(); }
+        finally
+        {
+            if (operation == null) _cloudService.RequestStop();
+            // 本次 CTS 只取消自己的会话；迟到回调不能停止新代次。
+            // 准备阶段由 RunAsync 等旧宏退出后收尾；已进入游戏时保留独立的关闭兜底。
+            if (operation is { IsPreparing: false }) _ = StopCloudSessionAndFinishAsync(operation);
+        }
+    }
+
+    private async Task CompleteCloudStartAsync(CloudStartOperation operation, bool ended)
+    {
+        if (ended || operation.HasEnded)
+        {
+            await FinishCloudSessionAsync(operation).ConfigureAwait(false);
+            return;
+        }
+        if (_disposed || operation.Token.IsCancellationRequested || !_cloudService.IsReady || !_cloudService.IsRunning)
+        {
+            await StopCloudSessionAndFinishAsync(operation).ConfigureAwait(false);
+            return;
+        }
+        try { await InvokeCloudUiAsync(operation, () => IsCloudStarting = false).ConfigureAwait(false); }
+        catch
+        {
+            await StopCloudSessionAndFinishAsync(operation).ConfigureAwait(false);
+            throw;
         }
     }
 
     private async Task StartCloudGameAsync()
     {
-        var accepted = await Application.Current.Dispatcher.InvokeAsync(() =>
+        var operation = await Application.Current.Dispatcher.InvokeAsync(() =>
         {
-            if (IsCaptureOrCloudActive || _cloudService.IsRunning) return false;
-            if (!GameTask.Common.TaskControl.TaskSemaphore.Wait(0))
+            if (_disposed || _cloudStartOperation != null || IsCaptureOrCloudActive || _cloudService.IsRunning) return null;
+            var acquired = CloudStartOperation.TryAcquire(GameTask.Common.TaskControl.TaskSemaphore);
+            if (acquired == null)
             {
                 ThemedMessageBox.Warning("请先停止当前自动任务，再启动网页云原神。");
-                return false;
+                return null;
             }
-            _cloudTaskLockHeld = true;
-            _cloudStartFlowActive = true;
-            _cloudEndedDuringStart = false;
-            Interlocked.Increment(ref _cloudGeneration);
-            _cloudStartCancellation = new CancellationTokenSource();
-            IsCloudStarting = true;
-            CloudPreview = null;
-            CloudRecognitionText = "";
-            return true;
-        });
-        if (!accepted) return;
-        // 先终止残留的一键宏并释放按键，再进入云模式；输入防护只丢弃输入，不会停止已在运行的宏。
-        await OneKeyFightTask.Instance.SuspendForCloudAsync();
-        await Application.Current.Dispatcher.InvokeAsync(() =>
-        {
-            TaskContext.Instance().IsCloudWeb = true;
-            _ = Core.Simulator.Simulation.SendInput; // 安装应用层桌面输入防护。
-            _mouseKeyMonitor.Unsubscribe();
-        });
-        var generation = _cloudGeneration;
-        var ct = _cloudStartCancellation!.Token;
+            try
+            {
+                _cloudStartOperation = acquired;
+                Interlocked.Increment(ref _cloudGeneration);
+                IsCloudStarting = true;
+                CloudStatus = "正在停止本地宏并准备网页云原神";
+                CloudPreview = null;
+                CloudRecognitionText = "";
+                return acquired;
+            }
+            catch
+            {
+                _cloudStartOperation = null;
+                _isCloudStarting = false;
+                acquired.Dispose();
+                throw;
+            }
+        }).Task.ConfigureAwait(false);
+        if (operation == null) return;
         Exception? failure = null;
         try
         {
-            ct.ThrowIfCancellationRequested();
-            await _cloudService.StartSessionAsync(Config.GenshinStartConfig, async (handle, processId) =>
-            {
-                await Application.Current.Dispatcher.InvokeAsync(() =>
+            await operation.RunAsync(
+                prepare: () => OneKeyFightTask.Instance.SuspendForCloudAsync(),
+                start: async ct =>
                 {
-                    ct.ThrowIfCancellationRequested();
-                    if (_disposed || generation != _cloudGeneration) throw new OperationCanceledException();
-                    _cloudSystemInfo = new CloudSystemInfo(processId);
-                    _hWnd = handle;
-                    _taskDispatcher.StartCloudWeb(handle, _cloudService.Capture, _cloudSystemInfo);
-                    TaskDispatcherEnabled = true;
-                });
-            }, ct);
+                    await InvokeCloudUiAsync(operation, () =>
+                    {
+                        TaskContext.Instance().IsCloudWeb = true;
+                        _ = Core.Simulator.Simulation.SendInput;
+                        _mouseKeyMonitor.Unsubscribe();
+                    }).ConfigureAwait(false);
+                    await _cloudService.StartSessionAsync(Config.GenshinStartConfig, async (handle, processId) =>
+                    {
+                        await InvokeCloudUiAsync(operation, () =>
+                        {
+                            _cloudSystemInfo = new CloudSystemInfo(processId);
+                            _hWnd = handle;
+                            _taskDispatcher.StartCloudWeb(handle, _cloudService.Capture, _cloudSystemInfo);
+                            _mouseKeyMonitor.SubscribeCloudHotkeys(handle);
+                            TaskDispatcherEnabled = true;
+                        }).ConfigureAwait(false);
+                    }, ct).ConfigureAwait(false);
+                },
+                isReady: () => _cloudService.IsReady,
+                stop: () => _cloudService.StopSessionForOwnerAsync(operation.Token),
+                complete: ended => CompleteCloudStartAsync(operation, ended)).ConfigureAwait(false);
         }
         catch (OperationCanceledException) { }
         catch (Exception ex)
         {
             failure = ex;
             _logger.LogWarning(ex, "网页云原神启动失败");
-        }
-        finally
-        {
-            var ended = !_cloudService.IsReady || ct.IsCancellationRequested;
-            if (ended) await _cloudService.StopSessionAsync();
-            if (Application.Current?.Dispatcher.HasShutdownStarted == false)
-            {
-                await Application.Current.Dispatcher.InvokeAsync(() =>
-                {
-                    if (generation != _cloudGeneration) return;
-                    _cloudStartFlowActive = false;
-                    IsCloudStarting = false;
-                    // 会话可能在本次收尾排队期间才结束，Ended 通知会被启动标志挡下，这里补一次判定。
-                    if (ended || _cloudEndedDuringStart || !_cloudService.IsRunning) FinishCloudSession();
-                });
-            }
         }
         if (failure != null && !_disposed) await ThemedMessageBox.ErrorAsync(failure.Message);
     }
@@ -573,10 +669,9 @@ public partial class HomePageViewModel : ViewModel, IDisposable
 
     private void Stop()
     {
-        if (TaskContext.Instance().IsCloudWeb || IsCloudStarting || _cloudService.IsRunning)
+        if (Volatile.Read(ref _cloudStartOperation) != null || TaskContext.Instance().IsCloudWeb || IsCloudStarting || _cloudService.IsRunning)
         {
-            _cloudStartCancellation?.Cancel();
-            _cloudService.RequestStop();
+            RequestCloudStop();
             CloudStatus = "正在取消排队并关闭独立浏览器…";
             return;
         }

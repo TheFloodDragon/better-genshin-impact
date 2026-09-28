@@ -175,6 +175,48 @@ public class CloudEntryFlowTests
         await restarted.StopSessionAsync().WaitAsync(TestTimeout);
     }
 
+    [Fact]
+    public async Task LateCleanupFromPreviousOwnerCannotStopNewSession()
+    {
+        var first = new ScriptedCloudBrowser([ScriptedStep.Final(Snapshot(CloudPageState.WaitingForLogin))]);
+        var second = new ScriptedCloudBrowser([ScriptedStep.Final(Snapshot(CloudPageState.WaitingForLogin))]);
+        var browsers = new Queue<ICloudBrowser>([first, second]);
+        using var firstOwner = new CancellationTokenSource();
+        using var secondOwner = new CancellationTokenSource();
+        await using var service = new CloudGenshinService(NullLogger<CloudGenshinService>.Instance,
+            () => browsers.Dequeue(), TimeProvider.System, _ => false, _ => null);
+        var firstStart = service.StartSessionAsync(Config, (_, _) => Task.CompletedTask, firstOwner.Token);
+        Task? secondStart = null;
+        try
+        {
+            await first.FirstProbe.Task.WaitAsync(TestTimeout);
+            await service.StopSessionForOwnerAsync(firstOwner.Token).WaitAsync(TestTimeout);
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => firstStart.WaitAsync(TestTimeout));
+
+            secondStart = service.StartSessionAsync(Config, (_, _) => Task.CompletedTask, secondOwner.Token);
+            await second.FirstProbe.Task.WaitAsync(TestTimeout);
+            // 模拟旧 UI continuation 在新会话启动之后才到达停止分支。
+            await service.StopSessionForOwnerAsync(firstOwner.Token).WaitAsync(TestTimeout);
+            Assert.True(service.IsRunning);
+            Assert.False(second.Disposed);
+            Assert.False(secondStart.IsCompleted);
+
+            await service.StopSessionForOwnerAsync(secondOwner.Token).WaitAsync(TestTimeout);
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => secondStart.WaitAsync(TestTimeout));
+            Assert.True(second.Disposed);
+        }
+        finally
+        {
+            await service.StopSessionAsync().WaitAsync(TestTimeout);
+            try { await firstStart.WaitAsync(TestTimeout); }
+            catch (OperationCanceledException) { }
+            if (secondStart != null)
+            {
+                try { await secondStart.WaitAsync(TestTimeout); }
+                catch (OperationCanceledException) { }
+            }
+        }
+    }
     private static readonly TimeSpan TestTimeout = TimeSpan.FromSeconds(60);
 
     private static CloudGenshinService CreateService(ICloudBrowser browser, TimeProvider clock, Func<bool> isInMainUi)

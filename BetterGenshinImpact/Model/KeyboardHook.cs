@@ -1,4 +1,4 @@
-﻿using BetterGenshinImpact.GameTask;
+using BetterGenshinImpact.GameTask;
 using Fischless.HotkeyCapture;
 using System;
 using System.Collections.Generic;
@@ -12,89 +12,93 @@ namespace BetterGenshinImpact.Model;
 public class KeyboardHook
 {
     public static Dictionary<Keys, KeyboardHook> AllKeyboardHooks = [];
-
-    public event EventHandler<KeyPressedEventArgs>? KeyPressedEvent = null;
-
-    public event EventHandler<KeyPressedEventArgs>? KeyDownEvent = null;
-
-    public event EventHandler<KeyPressedEventArgs>? KeyUpEvent = null;
-
+    public event EventHandler<KeyPressedEventArgs>? KeyPressedEvent;
+    public event EventHandler<KeyPressedEventArgs>? KeyDownEvent;
+    public event EventHandler<KeyPressedEventArgs>? KeyUpEvent;
     public bool IsHold { get; set; }
-
     public Keys BindKey { get; set; } = Keys.None;
-
-    public bool IsPressed { get; set; }
-
     public string ConfigPropertyName { get; set; } = string.Empty;
 
-    /// <summary>
-    /// 注意长按的时候会一直触发KeyDown
-    /// </summary>
-    /// <param name="sender"></param>
-    /// <param name="e"></param>
-    public void KeyDown(object? sender, KeyEventArgs e)
+    private volatile bool _isPressed;
+    private int _pressGeneration;
+    private readonly Func<bool> _isGameActive;
+    private readonly Func<string?, bool> _shouldBlockHotkey;
+    private readonly Action<Action> _queueAction;
+
+    public bool IsPressed
     {
-        if (!SystemControl.IsGenshinImpactActive())
+        get => _isPressed;
+        set
         {
-            return;
-        }
-
-        if (e.KeyCode == BindKey)
-        {
-            if (ChatUiHotkeyGuard.ShouldBlockHotkey(ConfigPropertyName))
-            {
-                return;
-            }
-
-            IsPressed = true;
-            KeyDownEvent?.Invoke(this, new KeyPressedEventArgs(User32.HotKeyModifiers.MOD_NONE, e.KeyCode));
-            if (IsHold)
-            {
-                if (KeyPressedEvent != null)
-                {
-                    Task.Run(() => RunAction(e));
-                }
-            }
-            else
-            {
-                KeyPressedEvent?.Invoke(this, new KeyPressedEventArgs(User32.HotKeyModifiers.MOD_NONE, e.KeyCode));
-                IsPressed = false;
-            }
+            if (!value) Interlocked.Increment(ref _pressGeneration);
+            _isPressed = value;
         }
     }
 
-    /// <summary>
-    /// 长按持续执行
-    /// </summary>
-    /// <param name="e"></param>
-    private void RunAction(KeyEventArgs e)
+    public KeyboardHook() : this(SystemControl.IsGenshinImpactActive, ChatUiHotkeyGuard.ShouldBlockHotkey) { }
+
+    internal KeyboardHook(Func<bool> isGameActive, Func<string?, bool> shouldBlockHotkey, Action<Action>? queueAction = null)
+    {
+        _isGameActive = isGameActive;
+        _shouldBlockHotkey = shouldBlockHotkey;
+        _queueAction = queueAction ?? (action => { _ = Task.Run(action); });
+    }
+
+    /// <summary>长按时系统会重复触发 KeyDown。</summary>
+    public void KeyDown(object? sender, KeyEventArgs e) => KeyDown(sender, e, false);
+
+    internal void KeyDown(object? sender, KeyEventArgs e, bool cloudOnly, Func<bool>? isCurrent = null)
+    {
+        if (!_isGameActive() || e.KeyCode != BindKey
+            || HotKeySettingModel.ShouldBlockCloudHotkey(ConfigPropertyName, cloudOnly)
+            || (!cloudOnly && _shouldBlockHotkey(ConfigPropertyName)) || isCurrent?.Invoke() == false) return;
+
+        var generation = Volatile.Read(ref _pressGeneration);
+        IsPressed = true;
+        KeyDownEvent?.Invoke(this, new KeyPressedEventArgs(User32.HotKeyModifiers.MOD_NONE, e.KeyCode));
+        if (!IsCurrentPress(generation) || isCurrent?.Invoke() == false) return;
+        if (IsHold && !cloudOnly)
+        {
+            if (KeyPressedEvent != null) _queueAction(() => RunAction(e, generation, isCurrent));
+        }
+        else
+        {
+            try { KeyPressedEvent?.Invoke(this, new KeyPressedEventArgs(User32.HotKeyModifiers.MOD_NONE, e.KeyCode)); }
+            finally { IsPressed = false; }
+        }
+    }
+
+    private bool IsCurrentPress(int generation) => IsPressed && generation == Volatile.Read(ref _pressGeneration);
+
+    private void RunAction(KeyEventArgs e, int generation, Func<bool>? isCurrent)
     {
         lock (this)
         {
-            while (IsPressed && KeyPressedEvent != null)
+            // 单纯清空 IsPressed 不足以作废排队中的长按：下一次按下会把它重新置 true。
+            while (IsCurrentPress(generation) && KeyPressedEvent != null && isCurrent?.Invoke() != false)
             {
-                if (ChatUiHotkeyGuard.ShouldBlockHotkey(ConfigPropertyName))
+                if (_shouldBlockHotkey(ConfigPropertyName))
                 {
                     Thread.Sleep(10);
                     continue;
                 }
-
                 KeyPressedEvent?.Invoke(this, new KeyPressedEventArgs(User32.HotKeyModifiers.MOD_NONE, e.KeyCode));
             }
         }
     }
 
-    public void KeyUp(object? sender, KeyEventArgs e)
+    public void KeyUp(object? sender, KeyEventArgs e) => KeyUp(sender, e, false);
+
+    internal void KeyUp(object? sender, KeyEventArgs e, bool cloudOnly, Func<bool>? isCurrent = null)
     {
-        if (e.KeyCode == BindKey)
-        {
-            IsPressed = false;
-            if (SystemControl.IsGenshinImpactActive() && !ChatUiHotkeyGuard.ShouldBlockHotkey(ConfigPropertyName))
-            {
-                KeyUpEvent?.Invoke(this, new KeyPressedEventArgs(User32.HotKeyModifiers.MOD_NONE, e.KeyCode));
-            }
-        }
+        if (e.KeyCode != BindKey) return;
+        ResetPressedState();
+        if (_isGameActive() && !HotKeySettingModel.ShouldBlockCloudHotkey(ConfigPropertyName, cloudOnly)
+            && (cloudOnly || !_shouldBlockHotkey(ConfigPropertyName)) && isCurrent?.Invoke() != false)
+            KeyUpEvent?.Invoke(this, new KeyPressedEventArgs(User32.HotKeyModifiers.MOD_NONE, e.KeyCode));
     }
+
+    internal void ResetPressedState() => IsPressed = false;
 
     public void RegisterHotKey(Keys key)
     {
@@ -104,13 +108,11 @@ public class KeyboardHook
 
     public void UnregisterHotKey()
     {
-        IsPressed = false;
+        ResetPressedState();
         IsHold = false;
-        AllKeyboardHooks.Remove(BindKey);
+        if (AllKeyboardHooks.TryGetValue(BindKey, out var hook) && ReferenceEquals(hook, this))
+            AllKeyboardHooks.Remove(BindKey);
     }
 
-    public void Dispose()
-    {
-        UnregisterHotKey();
-    }
+    public void Dispose() => UnregisterHotKey();
 }

@@ -48,9 +48,10 @@ public static class NewRetry
             {
                 if (attempted > 0)
                 {
-                    Thread.Sleep(retryInterval);
+                    MacroExecutionScope.Sleep(retryInterval);
                 }
 
+                MacroExecutionScope.Checkpoint();
                 return action();
             }
             catch (RetryException ex)

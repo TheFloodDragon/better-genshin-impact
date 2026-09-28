@@ -25,7 +25,7 @@ public class TaskControl
         TrySuspend();
         CheckAndActivateGameWindow();
 
-        Thread.Sleep(millisecondsTimeout);
+        MacroExecutionScope.Sleep(TimeSpan.FromMilliseconds(millisecondsTimeout));
     }
 
     public static void Sleep(int millisecondsTimeout)
@@ -35,7 +35,7 @@ public class TaskControl
             TrySuspend();
             CheckAndActivateGameWindow();
         }, TimeSpan.FromSeconds(1), 100);
-        Thread.Sleep(millisecondsTimeout);
+        MacroExecutionScope.Sleep(TimeSpan.FromMilliseconds(millisecondsTimeout));
     }
 
     private static bool IsKeyPressed(User32.VK key)
@@ -49,7 +49,16 @@ public class TaskControl
 
     public static void TrySuspend()
     {
-        
+        if (MacroExecutionScope.IsActive)
+        {
+            // 宏只等待全局暂停，并平衡自己取得的拾取暂停引用。
+            // 不解除全局 IsSuspend，也不恢复/释放其他任务的暂停对象和按键。
+            MacroExecutionScope.WaitWhile(() => RunnerContext.Instance.IsSuspend,
+                enter: () => RunnerContext.Instance.StopAutoPick(),
+                exit: () => RunnerContext.Instance.ResumeAutoPick());
+            return;
+        }
+
         var first = true;
         //此处为了记录最开始的暂停状态
         var isSuspend = RunnerContext.Instance.IsSuspend;
@@ -96,6 +105,7 @@ public class TaskControl
 
     private static void CheckAndActivateGameWindow()
     {
+        MacroExecutionScope.Checkpoint();
         if (!TaskContext.Instance().Config.OtherConfig.RestoreFocusOnLostEnabled)
         {
             if (!SystemControl.IsGenshinImpactActiveByProcess())
@@ -108,7 +118,7 @@ public class TaskControl
 
         var count = 0;
         //未激活则尝试恢复窗口
-        while (!SystemControl.IsGenshinImpactActiveByProcess())
+        MacroExecutionScope.WaitWhile(() => !SystemControl.IsGenshinImpactActiveByProcess(), step: () =>
         {
             if (count >= 10 && count % 10 == 0)
             {
@@ -121,14 +131,13 @@ public class TaskControl
                 Logger.LogInformation("当前获取焦点的窗口为: {Name}，不是原神，尝试恢复窗口", name);
                 SystemControl.FocusWindow(TaskContext.Instance().GameHandle);
             }
-
             count++;
-            Thread.Sleep(1000);
-        }
+        });
     }
 
     public static void Sleep(int millisecondsTimeout, CancellationToken ct)
     {
+        MacroExecutionScope.Checkpoint();
         if (ct.IsCancellationRequested)
         {
             throw new NormalEndException("取消自动任务");
@@ -149,7 +158,7 @@ public class TaskControl
             TrySuspend();
             CheckAndActivateGameWindow();
         }, TimeSpan.FromSeconds(1), 100);
-        Thread.Sleep(millisecondsTimeout);
+        MacroExecutionScope.Sleep(TimeSpan.FromMilliseconds(millisecondsTimeout), ct);
         if (ct.IsCancellationRequested)
         {
             throw new NormalEndException("取消自动任务");
@@ -158,6 +167,7 @@ public class TaskControl
 
     public static async Task Delay(int millisecondsTimeout, CancellationToken ct)
     {
+        MacroExecutionScope.Checkpoint();
         if (ct is { IsCancellationRequested: true })
         {
             throw new NormalEndException("取消自动任务");
@@ -178,7 +188,7 @@ public class TaskControl
             TrySuspend();
             CheckAndActivateGameWindow();
         }, TimeSpan.FromSeconds(1), 100);
-        await Task.Delay(millisecondsTimeout, ct);
+        await MacroExecutionScope.Delay(millisecondsTimeout, ct);
         if (ct is { IsCancellationRequested: true })
         {
             throw new NormalEndException("取消自动任务");
@@ -271,6 +281,7 @@ public class TaskControl
 
     public static Mat CaptureGameImage(IGameCapture? gameCapture)
     {
+        MacroExecutionScope.Checkpoint();
         var captureFrame = gameCapture?.Capture();
         var image = captureFrame?.Frame;
         if (image == null)
@@ -312,6 +323,7 @@ public class TaskControl
     /// <returns></returns>
     public static ImageRegion CaptureToRectArea(bool forceNew = false)
     {
+        MacroExecutionScope.Checkpoint();
         if (TaskContext.Instance().IsCloudWeb)
         {
             var frame = TaskTriggerDispatcher.GlobalGameCapture.Capture()

@@ -213,8 +213,12 @@ public partial class HotKeySettingModel : ObservableObject
 
     private bool ShouldBlockGlobalRegister()
     {
-        return ShouldBlockCloudHotkey(ConfigPropertyName, TaskContext.Instance().IsCloudWeb || OneKeyFightTask.Instance.IsCloudSuspended)
-            || (HotKeyType == HotKeyTypeEnum.GlobalRegister && ChatUiHotkeyGuard.ShouldBlockHotkey(ConfigPropertyName));
+        if (TaskContext.Instance().IsCloudWeb || OneKeyFightTask.Instance.IsCloudSuspended)
+        {
+            // 云端没有本地聊天状态识别，不能让切换前的聊天状态屏蔽停止等安全动作。
+            return ShouldBlockCloudHotkey(ConfigPropertyName, true);
+        }
+        return HotKeyType == HotKeyTypeEnum.GlobalRegister && ChatUiHotkeyGuard.ShouldBlockHotkey(ConfigPropertyName);
     }
 
     /// <summary>
@@ -223,7 +227,7 @@ public partial class HotKeySettingModel : ObservableObject
     /// </summary>
     internal static bool ShouldBlockCloudHotkey(string? configPropertyName, bool cloudActive)
     {
-        if (!cloudActive || string.IsNullOrEmpty(configPropertyName)) return false;
+        if (!cloudActive) return false;
         return configPropertyName switch
         {
             nameof(HotKeyConfig.BgiEnabledHotkey) => false,

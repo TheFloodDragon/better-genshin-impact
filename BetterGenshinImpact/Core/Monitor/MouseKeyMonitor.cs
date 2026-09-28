@@ -1,296 +1,316 @@
-using BetterGenshinImpact.Core.Config;
-using BetterGenshinImpact.Core.Recorder;
-using BetterGenshinImpact.Core.Simulator;
-using BetterGenshinImpact.GameTask;
 using BetterGenshinImpact.Model;
 using Gma.System.MouseKeyHook;
 using System;
-using System.Diagnostics;
-using System.Threading;
+using System.Collections.Generic;
+using System.Linq;
 using System.Windows.Forms;
 using Vanara.PInvoke;
-using Timer = System.Timers.Timer;
 
-// Wine 平台适配
-using BetterGenshinImpact.Platform.Wine;
 namespace BetterGenshinImpact.Core.Monitor;
 
 public partial class MouseKeyMonitor : IDisposable
 {
-    private bool _isSubscribed;
+    private enum ListeningMode { None, Local, CloudHotkeys }
+
+    private readonly object _stateLock = new();
+    private readonly MouseKeyMonitorEnvironment _environment;
+    private ListeningMode _mode;
+    private long _session;
     private bool _disposed;
-
-    /// <summary>
-    ///     长按F变F连发
-    /// </summary>
-    private readonly Timer _fTimer = new();
-
+    private EventSubscription? _subscription;
+    private IHotkeyRepeatTimer? _fTimer;
+    private IHotkeyRepeatTimer? _spaceTimer;
     private Keys _pickUpKey = Keys.F;
-
     private User32.VK _pickUpKeyCode = User32.VK.VK_F;
-
-    //private readonly Random _random = new();
-
-    /// <summary>
-    ///     长按空格变空格连发
-    /// </summary>
-    private readonly Timer _spaceTimer = new();
-
     private Keys _releaseControlKey = Keys.Space;
-
     private User32.VK _releaseControlKeyCode = User32.VK.VK_SPACE;
-
     private DateTime _firstFKeyDownTime = DateTime.MaxValue;
-
-    /// <summary>
-    ///     DateTime.MaxValue 代表没有按下
-    /// </summary>
     private DateTime _firstSpaceKeyDownTime = DateTime.MaxValue;
+    private nint _hWnd;
 
     private static IKeyboardMouseEvents? _globalHook;
-    private static readonly object GlobalHookLock = new object();
+    private static readonly object GlobalHookLock = new();
+
     public static IKeyboardMouseEvents GlobalHook
     {
         get
         {
-            if (_globalHook == null)
+            lock (GlobalHookLock)
+                return _globalHook ??= Hook.GlobalEvents();
+        }
+    }
+
+    internal static void ReleaseGlobalHook(IKeyboardMouseEvents hook)
+    {
+        lock (GlobalHookLock)
+        {
+            if (ReferenceEquals(_globalHook, hook)) _globalHook = null;
+            hook.Dispose();
+        }
+    }
+
+    public MouseKeyMonitor() : this(new MouseKeyMonitorEnvironment()) { }
+
+    internal MouseKeyMonitor(MouseKeyMonitorEnvironment environment) => _environment = environment;
+
+    public void Subscribe(nint gameHandle) => SubscribeCore(gameHandle, ListeningMode.Local);
+
+    /// <summary>
+    /// 仅监听云模式允许的安全快捷键，不启动录制、聊天预判或游戏输入连发。
+    /// 与 Subscribe 一样在 UI 线程调用，且仍尊重 DisableInputMonitor。
+    /// </summary>
+    public void SubscribeCloudHotkeys(nint gameHandle) => SubscribeCore(gameHandle, ListeningMode.CloudHotkeys);
+
+    private void SubscribeCore(nint gameHandle, ListeningMode mode)
+    {
+        lock (_stateLock)
+        {
+            ObjectDisposedException.ThrowIf(_disposed, this);
+            if (_environment.IsInputDisabled())
             {
-                lock (GlobalHookLock)
+                StopListening();
+                return;
+            }
+
+            if (_mode == mode && _hWnd == gameHandle) return;
+            StopListening();
+            _hWnd = gameHandle;
+            var session = _session;
+            try
+            {
+                if (mode == ListeningMode.Local)
                 {
-                    if (_globalHook == null)
-                    {
-                        _globalHook = Hook.GlobalEvents();
-                    }
+                    var settings = _environment.GetSettings();
+                    _pickUpKey = settings.PickUpKey;
+                    _pickUpKeyCode = settings.PickUpKeyCode;
+                    _releaseControlKey = settings.JumpKey;
+                    _releaseControlKeyCode = settings.JumpKeyCode;
+                    IHotkeyRepeatTimer? fTimer = null;
+                    fTimer = _environment.CreateRepeatTimer(settings.FInterval,
+                        () => OnRepeatTimerElapsed(session, fTimer, _pickUpKeyCode));
+                    _fTimer = fTimer;
+                    IHotkeyRepeatTimer? spaceTimer = null;
+                    spaceTimer = _environment.CreateRepeatTimer(settings.SpaceInterval,
+                        () => OnRepeatTimerElapsed(session, spaceTimer, _releaseControlKeyCode));
+                    _spaceTimer = spaceTimer;
                 }
+
+                if (!_environment.IsWine())
+                {
+                    _subscription = new EventSubscription(this, _environment.CreateEventSource(), session);
+                    _subscription.Attach();
+                }
+                else if (mode == ListeningMode.Local)
+                {
+                    // 保留 Wine 本地轮询路径；云模式绝不启动连发轮询。
+                    TrySubscribeWinePolling(session);
+                }
+
+                _mode = mode;
             }
-            return _globalHook;
-        }
-    }
-    private nint _hWnd;
-
-    public MouseKeyMonitor()
-    {
-        _spaceTimer.Elapsed += OnSpaceTimerElapsed;
-        _fTimer.Elapsed += OnFTimerElapsed;
-    }
-
-    public void Subscribe(nint gameHandle)
-    {
-        ObjectDisposedException.ThrowIf(_disposed, this);
-        _hWnd = gameHandle;
-
-        _pickUpKey = TaskContext.Instance().Config.KeyBindingsConfig.PickUpOrInteract.ToWinFormKeys();
-        _pickUpKeyCode = TaskContext.Instance().Config.KeyBindingsConfig.PickUpOrInteract.ToVK();
-        _releaseControlKey = TaskContext.Instance().Config.KeyBindingsConfig.Jump.ToWinFormKeys();
-        _releaseControlKeyCode = TaskContext.Instance().Config.KeyBindingsConfig.Jump.ToVK();
-
-        _firstSpaceKeyDownTime = DateTime.MaxValue;
-        var si = TaskContext.Instance().Config.MacroConfig.SpaceFireInterval;
-        _spaceTimer.Interval = si;
-
-        var fi = TaskContext.Instance().Config.MacroConfig.FFireInterval;
-        _fTimer.Interval = fi;
-
-        // 开关禁用时不装键鼠监听
-        if (TaskContext.Instance().Config.DisableInputMonitor)
-        {
-            if (_isSubscribed) Unsubscribe();
-            return;
-        }
-
-        if (_isSubscribed)
-        {
-            return;
-        }
-
-        // Note: for the application hook, use the Hook.AppEvents() instead
-        if (!WinePlatformAddon.IsRunningOnWine)
-        {
-            GlobalHook.KeyDown += GlobalHookKeyDown;
-            GlobalHook.KeyUp += GlobalHookKeyUp;
-            GlobalHook.MouseDownExt += GlobalHookMouseDownExt;
-            GlobalHook.MouseUpExt += GlobalHookMouseUpExt;
-            GlobalHook.MouseMoveExt += GlobalHookMouseMoveExt;
-            GlobalHook.MouseWheelExt += GlobalHookMouseWheelExt;
-        }
-        TrySubscribeWinePolling();
-        //_globalHook.KeyPress += GlobalHookKeyPress;
-        _isSubscribed = true;
-    }
-
-    private void OnSpaceTimerElapsed(object? sender, System.Timers.ElapsedEventArgs e)
-    {
-        Simulation.PostMessage(_hWnd).KeyPress(_releaseControlKeyCode);
-    }
-
-    private void OnFTimerElapsed(object? sender, System.Timers.ElapsedEventArgs e)
-    {
-        Simulation.PostMessage(_hWnd).KeyPress(_pickUpKeyCode);
-    }
-
-    private void GlobalHookKeyDown(object? sender, KeyEventArgs e)
-    {
-        // Debug.WriteLine("KeyDown: \t{0}", e.KeyCode);
-        GlobalKeyMouseRecord.Instance.GlobalHookKeyDown(e, DateTime.UtcNow);
-
-        if (SystemControl.IsGenshinImpactActive())
-        {
-            ChatUiHotkeyGuard.PrimeFromChatKey(e.KeyCode);
-        }
-
-        // 热键按下事件
-        HotKeyDown(sender, e);
-
-        if (e.KeyCode == _releaseControlKey)
-        {
-            if (_firstSpaceKeyDownTime == DateTime.MaxValue)
+            catch (Exception startError)
             {
-                _firstSpaceKeyDownTime = DateTime.Now;
-            }
-            else
-            {
-                var timeSpan = DateTime.Now - _firstSpaceKeyDownTime;
-                if (timeSpan.TotalMilliseconds > 300 && TaskContext.Instance().Config.MacroConfig.SpacePressHoldToContinuationEnabled)
-                    if (!_spaceTimer.Enabled)
-                        _spaceTimer.Start();
+                try { StopListening(); }
+                catch (Exception cleanupError) { throw new AggregateException(startError, cleanupError); }
+                throw;
             }
         }
-        else if (e.KeyCode == _pickUpKey)
+    }
+
+    private bool IsCurrent(long session) => !_disposed && _mode != ListeningMode.None && _session == session;
+
+    private bool CanDispatch(long session)
+    {
+        lock (_stateLock) return IsCurrent(session) && !_environment.IsInputDisabled();
+    }
+
+    private void OnRepeatTimerElapsed(long session, IHotkeyRepeatTimer? timer, User32.VK key)
+    {
+        // Stop/Dispose 不保证已排队的 Elapsed 消失。会话校验排除旧回调，
+        // 同一锁保证切换返回前已在途的短输入完成，之后不会再发送输入。
+        lock (_stateLock)
         {
-            if (_firstFKeyDownTime == DateTime.MaxValue)
-            {
-                _firstFKeyDownTime = DateTime.Now;
-            }
-            else
-            {
-                var timeSpan = DateTime.Now - _firstFKeyDownTime;
-                if (timeSpan.TotalMilliseconds > 200 && TaskContext.Instance().Config.MacroConfig.FPressHoldToContinuationEnabled)
-                    if (!_fTimer.Enabled)
-                        _fTimer.Start();
-            }
+            if (!IsCurrent(session) || _mode != ListeningMode.Local || timer?.Enabled != true
+                || _environment.IsInputDisabled()) return;
+            _environment.SendRepeat(_hWnd, key);
         }
     }
 
-    private void GlobalHookKeyUp(object? sender, KeyEventArgs e)
+    private void HandleKey(long session, object? sender, KeyEventArgs e, bool down)
     {
-        // Debug.WriteLine("KeyUp: \t{0}", e.KeyCode);
-        GlobalKeyMouseRecord.Instance.GlobalHookKeyUp(e, DateTime.UtcNow);
-
-        // 热键松开事件
-        HotKeyUp(sender, e);
-
-        if (e.KeyCode == _releaseControlKey)
+        KeyboardHook? hook;
+        bool cloudOnly;
+        lock (_stateLock)
         {
-            if (_firstSpaceKeyDownTime != DateTime.MaxValue)
+            if (!IsCurrent(session) || _environment.IsInputDisabled()) return;
+            cloudOnly = _mode == ListeningMode.CloudHotkeys;
+            // 必须先决定模式，云事件不能接触任何录制或聊天识别入口。
+            if (!cloudOnly)
             {
-                var timeSpan = DateTime.Now - _firstSpaceKeyDownTime;
-                Debug.WriteLine($"Space按下时间：{timeSpan.TotalMilliseconds}ms");
-                _firstSpaceKeyDownTime = DateTime.MaxValue;
-                _spaceTimer.Stop();
+                _environment.RecordKey(e, down);
+                if (down && _environment.IsGameActive()) _environment.PrimeChat(e.KeyCode);
             }
+            _environment.KeyboardHooks.TryGetValue(e.KeyCode, out hook);
         }
-        else if (e.KeyCode == _pickUpKey)
+
+        if (hook != null && !HotKeySettingModel.ShouldBlockCloudHotkey(hook.ConfigPropertyName, cloudOnly))
         {
-            if (_firstFKeyDownTime != DateTime.MaxValue)
-            {
-                var timeSpan = DateTime.Now - _firstFKeyDownTime;
-                Debug.WriteLine($"F按下时间：{timeSpan.TotalMilliseconds}ms");
-                _firstFKeyDownTime = DateTime.MaxValue;
-                _fTimer.Stop();
-            }
+            // 不持有监听生命周期锁调用用户回调（回调可以停止监听或切换 UI）。
+            if (down) hook.KeyDown(sender, e, cloudOnly, () => CanDispatch(session));
+            else hook.KeyUp(sender, e, cloudOnly, () => CanDispatch(session));
+        }
+
+        if (cloudOnly) return;
+        lock (_stateLock)
+        {
+            // 快捷键本身可能已退订/切换监听，不得由同一次事件重新启用连发。
+            if (!IsCurrent(session) || _mode != ListeningMode.Local) return;
+            if (e.KeyCode == _releaseControlKey)
+                UpdateRepeat(down, ref _firstSpaceKeyDownTime, _spaceTimer, 300, _environment.SpaceRepeatEnabled);
+            else if (e.KeyCode == _pickUpKey)
+                UpdateRepeat(down, ref _firstFKeyDownTime, _fTimer, 200, _environment.FRepeatEnabled);
         }
     }
 
-    private void HotKeyDown(object? sender, KeyEventArgs e)
+    private void UpdateRepeat(bool down, ref DateTime firstDown, IHotkeyRepeatTimer? timer, int threshold, Func<bool> enabled)
     {
-        if (KeyboardHook.AllKeyboardHooks.TryGetValue(e.KeyCode, out var hook)) hook.KeyDown(sender, e);
+        if (!down)
+        {
+            firstDown = DateTime.MaxValue;
+            timer?.Stop();
+        }
+        else if (firstDown == DateTime.MaxValue)
+        {
+            firstDown = _environment.Now();
+        }
+        else if ((_environment.Now() - firstDown).TotalMilliseconds > threshold && enabled() && timer?.Enabled == false)
+        {
+            timer.Start();
+        }
     }
 
-    private void HotKeyUp(object? sender, KeyEventArgs e)
+    private void HandleMouse(long session, object? sender, MouseEventExtArgs e, MouseMonitorEvent kind)
     {
-        if (KeyboardHook.AllKeyboardHooks.TryGetValue(e.KeyCode, out var hook)) hook.KeyUp(sender, e);
-    }
+        MouseHook? hook;
+        bool cloudOnly;
+        lock (_stateLock)
+        {
+            if (!IsCurrent(session) || _environment.IsInputDisabled()) return;
+            cloudOnly = _mode == ListeningMode.CloudHotkeys;
+            if (!cloudOnly) _environment.RecordMouse(e, kind);
+            if (kind is MouseMonitorEvent.Move or MouseMonitorEvent.Wheel) return;
+            if (e.Button == MouseButtons.Left || (cloudOnly && e.Button is not (MouseButtons.XButton1 or MouseButtons.XButton2))) return;
+            _environment.MouseHooks.TryGetValue(e.Button, out hook);
+        }
 
-    //private void GlobalHookKeyPress(object? sender, KeyPressEventArgs e)
-    //{
-    //    Debug.WriteLine("KeyPress: \t{0}", e.KeyChar);
-    //}
-
-    private void GlobalHookMouseDownExt(object? sender, MouseEventExtArgs e)
-    {
-        // Debug.WriteLine("MouseDown: {0}; \t Location: {1};\t System Timestamp: {2}", e.Button, e.Location, e.Timestamp);
-        GlobalKeyMouseRecord.Instance.GlobalHookMouseDown(e, DateTime.UtcNow);
-
-        if (e.Button != MouseButtons.Left)
-            if (MouseHook.AllMouseHooks.TryGetValue(e.Button, out var hook))
-                hook.MouseDown(sender, e);
-    }
-
-    private void GlobalHookMouseUpExt(object? sender, MouseEventExtArgs e)
-    {
-        // Debug.WriteLine("MouseUp: {0}; \t Location: {1};\t System Timestamp: {2}", e.Button, e.Location, e.Timestamp);
-        GlobalKeyMouseRecord.Instance.GlobalHookMouseUp(e, DateTime.UtcNow);
-
-        if (e.Button != MouseButtons.Left)
-            if (MouseHook.AllMouseHooks.TryGetValue(e.Button, out var hook))
-                hook.MouseUp(sender, e);
-    }
-
-    private void GlobalHookMouseMoveExt(object? sender, MouseEventExtArgs e)
-    {
-        // Debug.WriteLine("MouseMove: {0}; \t Location: {1};\t System Timestamp: {2}", e.Button, e.Location, e.Timestamp);
-        GlobalKeyMouseRecord.Instance.GlobalHookMouseMoveTo(e, DateTime.UtcNow);    
-    }
-    
-    private void GlobalHookMouseWheelExt(object? sender, MouseEventExtArgs e)
-    {
-        // Debug.WriteLine("MouseMove: {0}; \t Location: {1};\t Delta: {2};\t System Timestamp: {3}", e.Button, e.Location, e.Delta, e.Timestamp);
-        GlobalKeyMouseRecord.Instance.GlobalHookMouseWheel(e, DateTime.UtcNow);
+        if (hook == null || HotKeySettingModel.ShouldBlockCloudHotkey(hook.ConfigPropertyName, cloudOnly)) return;
+        if (kind == MouseMonitorEvent.Down) hook.MouseDown(sender, e, cloudOnly, () => CanDispatch(session));
+        else hook.MouseUp(sender, e, cloudOnly, () => CanDispatch(session));
     }
 
     public void Unsubscribe()
     {
-        _spaceTimer.Stop();
-        _fTimer.Stop();
-        _firstSpaceKeyDownTime = DateTime.MaxValue;
+        lock (_stateLock) StopListening();
+    }
+
+    // 所有引用先失效，再逐个清理；其中一个 Dispose 失败也不会遗留其他监听或 timer。
+    private void StopListening()
+    {
+        _mode = ListeningMode.None;
+        ++_session;
         _firstFKeyDownTime = DateTime.MaxValue;
+        _firstSpaceKeyDownTime = DateTime.MaxValue;
+        foreach (var hook in _environment.KeyboardHooks.Values.ToArray()) hook.ResetPressedState();
+        foreach (var hook in _environment.MouseHooks.Values.ToArray()) hook.ResetPressedState();
 
-        if (!_isSubscribed)
+        var subscription = _subscription;
+        var fTimer = _fTimer;
+        var spaceTimer = _spaceTimer;
+        _subscription = null;
+        _fTimer = null;
+        _spaceTimer = null;
+        List<Exception>? errors = null;
+        void Cleanup(Action action)
         {
-            return;
+            try { action(); }
+            catch (Exception error) { (errors ??= []).Add(error); }
         }
-
-        if (_globalHook != null && !WinePlatformAddon.IsRunningOnWine)
+        if (fTimer != null)
         {
-            _globalHook.KeyDown -= GlobalHookKeyDown;
-            _globalHook.KeyUp -= GlobalHookKeyUp;
-            _globalHook.MouseDownExt -= GlobalHookMouseDownExt;
-            _globalHook.MouseUpExt -= GlobalHookMouseUpExt;
-            _globalHook.MouseMoveExt -= GlobalHookMouseMoveExt;
-            _globalHook.MouseWheelExt -= GlobalHookMouseWheelExt;
-            //_globalHook.KeyPress -= GlobalHookKeyPress;
-            _globalHook.Dispose();
-            _globalHook = null;
+            Cleanup(fTimer.Stop);
+            Cleanup(fTimer.Dispose);
         }
-        if (WinePlatformAddon.IsRunningOnWine){
-          DisposeWineAddon();
+        if (spaceTimer != null)
+        {
+            Cleanup(spaceTimer.Stop);
+            Cleanup(spaceTimer.Dispose);
         }
-        _isSubscribed = false;
+        Cleanup(DisposeWineAddon);
+        if (subscription != null) Cleanup(subscription.Dispose);
+        if (errors != null) throw new AggregateException(errors);
     }
 
     public void Dispose()
     {
-        if (_disposed)
+        lock (_stateLock)
         {
-            return;
+            if (_disposed) return;
+            _disposed = true;
+            try { StopListening(); }
+            finally { GC.SuppressFinalize(this); }
+        }
+    }
+
+    // 每次订阅捕获独立 session，旧事件即使已经排队也无法进入新一轮本地监听。
+    private sealed class EventSubscription : IDisposable
+    {
+        private readonly MouseKeyMonitor _owner;
+        private readonly IKeyboardMouseEvents _source;
+        private readonly KeyEventHandler _keyDown;
+        private readonly KeyEventHandler _keyUp;
+        private readonly EventHandler<MouseEventExtArgs> _mouseDown;
+        private readonly EventHandler<MouseEventExtArgs> _mouseUp;
+        private readonly EventHandler<MouseEventExtArgs> _mouseMove;
+        private readonly EventHandler<MouseEventExtArgs> _mouseWheel;
+
+        internal EventSubscription(MouseKeyMonitor owner, IKeyboardMouseEvents source, long session)
+        {
+            _owner = owner;
+            _source = source;
+            _keyDown = (s, e) => owner.HandleKey(session, s, e, true);
+            _keyUp = (s, e) => owner.HandleKey(session, s, e, false);
+            _mouseDown = (s, e) => owner.HandleMouse(session, s, e, MouseMonitorEvent.Down);
+            _mouseUp = (s, e) => owner.HandleMouse(session, s, e, MouseMonitorEvent.Up);
+            _mouseMove = (s, e) => owner.HandleMouse(session, s, e, MouseMonitorEvent.Move);
+            _mouseWheel = (s, e) => owner.HandleMouse(session, s, e, MouseMonitorEvent.Wheel);
         }
 
-        Unsubscribe();
-        _disposed = true;
-        _spaceTimer.Elapsed -= OnSpaceTimerElapsed;
-        _fTimer.Elapsed -= OnFTimerElapsed;
-        _spaceTimer.Dispose();
-        _fTimer.Dispose();
-        GC.SuppressFinalize(this);
+        internal void Attach()
+        {
+            _source.KeyDown += _keyDown;
+            _source.KeyUp += _keyUp;
+            _source.MouseDownExt += _mouseDown;
+            _source.MouseUpExt += _mouseUp;
+            _source.MouseMoveExt += _mouseMove;
+            _source.MouseWheelExt += _mouseWheel;
+        }
+
+        public void Dispose()
+        {
+            List<Exception>? errors = null;
+            void Cleanup(Action action)
+            {
+                try { action(); }
+                catch (Exception error) { (errors ??= []).Add(error); }
+            }
+            Cleanup(() => _source.KeyDown -= _keyDown);
+            Cleanup(() => _source.KeyUp -= _keyUp);
+            Cleanup(() => _source.MouseDownExt -= _mouseDown);
+            Cleanup(() => _source.MouseUpExt -= _mouseUp);
+            Cleanup(() => _source.MouseMoveExt -= _mouseMove);
+            Cleanup(() => _source.MouseWheelExt -= _mouseWheel);
+            Cleanup(() => _owner._environment.ReleaseEventSource(_source));
+            if (errors != null) throw new AggregateException(errors);
+        }
     }
 }

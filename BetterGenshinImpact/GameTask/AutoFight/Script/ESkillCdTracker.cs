@@ -4,6 +4,8 @@ using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using BetterGenshinImpact.GameTask.AutoFight.Config;
+using BetterGenshinImpact.GameTask.AutoGeniusInvokation.Exception;
+using BetterGenshinImpact.GameTask.Common;
 using Microsoft.Extensions.Logging;
 
 namespace BetterGenshinImpact.GameTask.AutoFight.Script;
@@ -58,21 +60,21 @@ public static class ESkillCdTracker
     /// <param name="ct">外部取消令牌</param>
     public static void TriggerECheck(Func<double> ocrFunc, string characterName, CancellationToken ct)
     {
-        CancellationTokenSource? oldCts;
-        CancellationTokenSource newCts;
+        MacroExecutionScope.Checkpoint();
+        CancellationTokenSource capturedCts;
+        CancellationToken debounceToken;
         lock (_debounceLock)
         {
-            oldCts = _debounceCts;
-            _debounceCts = newCts = new CancellationTokenSource();
+            // 防抖取消和任务自己的释放串行；不把已释放的 CTS 留在全局槽位。
+            _debounceCts?.Cancel();
+            capturedCts = MacroExecutionScope.IsActive
+                ? CancellationTokenSource.CreateLinkedTokenSource(ct, MacroExecutionScope.Token)
+                : new CancellationTokenSource();
+            debounceToken = capturedCts.Token;
+            _debounceCts = capturedCts;
         }
 
-        // 只取消旧 CTS（唤醒旧 Task），Dispose 由旧 Task 自身的 finally 处理
-        try { oldCts?.Cancel(); } catch (ObjectDisposedException) { }
-
-        var capturedCts = newCts;
-        var debounceToken = capturedCts.Token;
-
-        Task.Run(() =>
+        _ = MacroExecutionScope.RunChild(() =>
         {
             try
             {
@@ -105,12 +107,17 @@ public static class ESkillCdTracker
                     Logger.LogWarning("{Name} 战技cd未更新", characterName);
                 }
             }
+            catch (NormalEndException) { }
             catch (OperationCanceledException) { }
             finally
             {
-                capturedCts.Dispose();
+                lock (_debounceLock)
+                {
+                    if (ReferenceEquals(_debounceCts, capturedCts)) _debounceCts = null;
+                    capturedCts.Dispose();
+                }
             }
-        }, CancellationToken.None);
+        });
     }
 
     /// <summary>

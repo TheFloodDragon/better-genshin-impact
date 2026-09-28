@@ -4,6 +4,7 @@ using BetterGenshinImpact.Core.Simulator.Extensions;
 using BetterGenshinImpact.GameTask.AutoFight.Assets;
 using BetterGenshinImpact.GameTask.AutoFight.Config;
 using BetterGenshinImpact.GameTask.AutoFight.Script;
+using BetterGenshinImpact.GameTask.Common;
 using BetterGenshinImpact.GameTask.Model.Area;
 using BetterGenshinImpact.Helpers;
 using Microsoft.Extensions.Logging;
@@ -175,16 +176,19 @@ public static class AvatarSpecialAction
             {
                 using (AvatarRecognition.BeginExclusiveOperation())
                 {
-                    Simulation.SendInput.SimulateAction(GIActions.ElementalSkill, KeyType.KeyDown);
-                    Sleep(300, avatar.Ct);
-                    for (int j = 0; j < 10; j++)
-                    {
-                        Simulation.SendInput.Mouse.MoveMouseBy(1000, 0);
-                        Sleep(50);
-                    }
-
-                    Sleep(300);
-                    Simulation.SendInput.SimulateAction(GIActions.ElementalSkill, KeyType.KeyUp);
+                    MacroExecutionScope.Hold(
+                        () => Simulation.SendInput.SimulateAction(GIActions.ElementalSkill, KeyType.KeyDown),
+                        () =>
+                        {
+                            Sleep(300, avatar.Ct);
+                            for (int j = 0; j < 10; j++)
+                            {
+                                Simulation.SendInput.Mouse.MoveMouseBy(1000, 0);
+                                Sleep(50);
+                            }
+                            Sleep(300);
+                        },
+                        () => Simulation.SendInput.SimulateAction(GIActions.ElementalSkill, KeyType.KeyUp));
                     return true;
                 }
             }
@@ -214,9 +218,9 @@ public static class AvatarSpecialAction
                 using (AvatarRecognition.BeginExclusiveOperation())
                 {
                     var dpi = TaskContext.Instance().DpiScale;
-                    Simulation.SendInput.SimulateAction(GIActions.NormalAttack, KeyType.KeyDown);
                     try
                     {
+                        Simulation.SendInput.SimulateAction(GIActions.NormalAttack, KeyType.KeyDown);
                         while (ms >= 0)
                         {
                             if (avatar.Ct is { IsCancellationRequested: true })
@@ -242,9 +246,9 @@ public static class AvatarSpecialAction
                 using (AvatarRecognition.BeginExclusiveOperation())
                 {
                     var dpi = TaskContext.Instance().DpiScale;
-                    Simulation.SendInput.SimulateAction(GIActions.NormalAttack, KeyType.KeyDown);
                     try
                     {
+                        Simulation.SendInput.SimulateAction(GIActions.NormalAttack, KeyType.KeyDown);
                         int tick = -4;
                         while (ms >= 0)
                         {

@@ -45,7 +45,7 @@ public class CloudLiveEntryProbe
         {
             var snapshot = await detector.InspectAsync(browser, cts.Token);
             last = snapshot;
-            if (seen.Count == 0 || seen[^1] != snapshot.State)
+            if (seen.Count == 0 || seen[^1] != snapshot.State || snapshot.State == CloudPageState.LoginRequired)
             {
                 seen.Add(snapshot.State);
                 Log($"#{i} state={snapshot.State} action={snapshot.Action} verified={snapshot.ActionVerified} " +
@@ -53,9 +53,26 @@ public class CloudLiveEntryProbe
                     $"dpr={snapshot.DevicePixelRatio} stream={snapshot.StreamReady} msg={snapshot.Message}");
             }
             // 已登录时立刻停止：继续推进会真实进入排队并消耗云游戏时长。
-            if (snapshot.State is CloudPageState.LoginRequired or CloudPageState.WaitingForLogin
-                or CloudPageState.VerificationRequired or CloudPageState.Lobby
-                or CloudPageState.QueueSelection or CloudPageState.Streaming) break;
+            if (snapshot.State is CloudPageState.WaitingForLogin or CloudPageState.VerificationRequired
+                or CloudPageState.Lobby or CloudPageState.QueueSelection or CloudPageState.Streaming) break;
+            // 首屏入场动画期间入口可见但中心点尚被遮挡，必须继续观察，不能把状态出现当作可点击。
+            if (snapshot.State == CloudPageState.LoginRequired)
+            {
+                if (CloudPageDetector.CanAutoClick(snapshot)) break;
+                // 仅诊断入口几何及遮挡，不读取表单、账号正文或二维码。
+                var geometry = await browser.EvaluateAsync("""
+                    (() => {
+                      const el = document.querySelector('.welcome-wrapper__btn');
+                      if (!el) return {entry:false};
+                      const r = el.getBoundingClientRect(), s = getComputedStyle(el);
+                      const hit = document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2);
+                      return {entry:true, x:r.x, y:r.y, w:r.width, h:r.height, disabled:!!el.disabled,
+                        ariaDisabled:el.getAttribute('aria-disabled'), opacity:s.opacity, display:s.display,
+                        hitSelf:hit===el || !!(hit && el.contains(hit)), hitTag:hit?.tagName, hitClass:hit?.className};
+                    })()
+                    """, cts.Token);
+                Log($"login entry awaiting hit-test #{i}: {geometry?.ToString(Newtonsoft.Json.Formatting.None)}");
+            }
             await Task.Delay(1500, cts.Token);
         }
 

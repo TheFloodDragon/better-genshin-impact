@@ -1,4 +1,5 @@
 using BetterGenshinImpact.GameTask.AutoFight.Model;
+using BetterGenshinImpact.GameTask.AutoGeniusInvokation.Exception;
 using BetterGenshinImpact.GameTask.Common;
 using BetterGenshinImpact.Helpers;
 using System;
@@ -124,6 +125,7 @@ public class CombatCommand
 
     public void Execute(Avatar avatar)
     {
+        MacroExecutionScope.Checkpoint();
         if (Method == Method.Skill)
         {
             var hold = Args != null && Args.Contains("hold");
@@ -139,8 +141,11 @@ public class CombatCommand
             }
             else if (wait)
             {
-                // 等待e结束,同步等待
-                avatar.WaitSkillCd().Wait();
+                // 宏只使用强停令牌；普通任务保持原来的同步等待行为。
+                if (MacroExecutionScope.IsActive)
+                    avatar.WaitSkillCd(MacroExecutionScope.Token).GetAwaiter().GetResult();
+                else
+                    avatar.WaitSkillCd().Wait();
             }
 
             avatar.UseSkill(hold);
@@ -331,9 +336,13 @@ public class CombatCommand
                     using var region = TaskControl.CaptureToRectArea();
                     cd = avatar.AfterUseSkill(region);
                     if (cd > 0) break;
-                    if (attempt < 3) Thread.Sleep(100);
+                    if (attempt < 3) MacroExecutionScope.Sleep(TimeSpan.FromMilliseconds(100));
                 }
                 return cd;
+            }
+            catch (NormalEndException)
+            {
+                throw;
             }
             catch (OperationCanceledException)
             {

@@ -246,7 +246,10 @@ public class Avatar
         try
         {
             // tp 到七天神像复活。保留等待取消能力，同时避免 Wait 将原异常包装为 AggregateException。
-            new TpTask(ct).TpToStatueOfTheSeven().WaitAsync(ct).GetAwaiter().GetResult();
+            var recovery = new TpTask(ct).TpToStatueOfTheSeven();
+            // 宏范围内不得只取消等待而遗留仍在发送输入的恢复任务。
+            if (MacroExecutionScope.IsActive) recovery.GetAwaiter().GetResult();
+            else recovery.WaitAsync(ct).GetAwaiter().GetResult();
             Logger.LogInformation("血量恢复完成。【设置】-【七天神像设置】可以修改回血相关配置。");
         }
         catch (NormalEndException)
@@ -394,11 +397,15 @@ public class Avatar
 
         Simulation.SendInput.SimulateAction(GIActions.Jump);
         Sleep(200, ct);
-        Simulation.SendInput.SimulateAction(direction, KeyType.KeyDown);
-        SimulateSwitchAction(Index);
-        Sleep(1000, ct);
-        Simulation.SendInput.SimulateAction(GIActions.NormalAttack);
-        Simulation.ReleaseAllKey();
+        MacroExecutionScope.Hold(
+            () => Simulation.SendInput.SimulateAction(direction, KeyType.KeyDown),
+            () =>
+            {
+                SimulateSwitchAction(Index);
+                Sleep(1000, ct);
+                Simulation.SendInput.SimulateAction(GIActions.NormalAttack);
+            },
+            () => Simulation.ReleaseAllKey());
     }
 
     /// <summary>
@@ -735,9 +742,10 @@ public class Avatar
             ms = 200;
         }
 
-        Simulation.SendInput.SimulateAction(GIActions.SprintMouse, KeyType.KeyDown);
-        Sleep(ms); // 冲刺不能被cts取消
-        Simulation.SendInput.SimulateAction(GIActions.SprintMouse, KeyType.KeyUp);
+        MacroExecutionScope.Hold(
+            () => Simulation.SendInput.SimulateAction(GIActions.SprintMouse, KeyType.KeyDown),
+            () => Sleep(ms), // 普通停止仍完成动作，只有宏强停打断等待。
+            () => Simulation.SendInput.SimulateAction(GIActions.SprintMouse, KeyType.KeyUp));
     }
 
     public void Walk(string key, int ms)
@@ -770,9 +778,10 @@ public class Avatar
             return;
         }
 
-        Simulation.SendInput.Keyboard.KeyDown(vk);
-        Sleep(ms); // 行走不能被cts取消
-        Simulation.SendInput.Keyboard.KeyUp(vk);
+        MacroExecutionScope.Hold(
+            () => Simulation.SendInput.Keyboard.KeyDown(vk),
+            () => Sleep(ms),
+            () => Simulation.SendInput.Keyboard.KeyUp(vk));
     }
 
     /// <summary>
@@ -990,9 +999,10 @@ public class Avatar
 
         if (AvatarSpecialAction.ExecuteSpecializedAction(this, "Charge", Name, new ActionArgs(Ms: ms))) return;
 
-        Simulation.SendInput.SimulateAction(GIActions.NormalAttack, KeyType.KeyDown);
-        Sleep(ms);
-        Simulation.SendInput.SimulateAction(GIActions.NormalAttack, KeyType.KeyUp);
+        MacroExecutionScope.Hold(
+            () => Simulation.SendInput.SimulateAction(GIActions.NormalAttack, KeyType.KeyDown),
+            () => Sleep(ms),
+            () => Simulation.SendInput.SimulateAction(GIActions.NormalAttack, KeyType.KeyUp));
     }
 
     public void MouseDown(string key = "left")

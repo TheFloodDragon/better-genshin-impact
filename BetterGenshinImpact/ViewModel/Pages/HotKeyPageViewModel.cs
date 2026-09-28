@@ -387,7 +387,8 @@ public partial class HotKeyPageViewModel : ObservableObject, IViewModel
             {
                 _logger.LogInformation("检测到您配置的停止快捷键{Key}按下，停止当前执行任务", Config.HotKeyConfig.CancelTaskHotkey);
                 CancellationContext.Instance.ManualCancel();
-                App.GetService<BetterGenshinImpact.Service.CloudGenshin.CloudGenshinService>()?.RequestStop();
+                // 云浏览器尚未创建时也要取消首页的准备阶段，不能只停止已经运行的服务。
+                WeakReferenceMessenger.Default.Send(new PropertyChangedMessage<object>(this, "CancelCloudSession", "", ""));
             }
         ));
         systemDirectory.Children.Add(new HotKeySettingModel(

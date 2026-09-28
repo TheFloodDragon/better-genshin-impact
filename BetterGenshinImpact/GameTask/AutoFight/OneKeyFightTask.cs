@@ -1,6 +1,7 @@
 using BetterGenshinImpact.Core.Config;
 using BetterGenshinImpact.GameTask.AutoFight.Model;
 using BetterGenshinImpact.GameTask.AutoFight.Script;
+using BetterGenshinImpact.GameTask.Common;
 using BetterGenshinImpact.Model;
 using BetterGenshinImpact.Service;
 using Microsoft.Extensions.Logging;
@@ -14,9 +15,7 @@ using static BetterGenshinImpact.GameTask.Common.TaskControl;
 
 namespace BetterGenshinImpact.GameTask.AutoFight;
 
-/// <summary>
-/// 一键战斗宏
-/// </summary>
+/// <summary>一键战斗宏</summary>
 public class OneKeyFightTask : Singleton<OneKeyFightTask>
 {
     public static readonly string HoldOnMode = "按住时重复(新)";
@@ -24,291 +23,129 @@ public class OneKeyFightTask : Singleton<OneKeyFightTask>
     public static readonly string TickMode = "触发";
 
     private Dictionary<string, List<CombatCommand>>? _avatarMacros;
-    private CancellationTokenSource? _cts = null;
-    private Task? _fightTask;
-    private readonly object _lifecycleLock = new();
-    private volatile bool _cloudSuspended;
-    public bool IsCloudSuspended => _cloudSuspended;
-
-    private volatile bool _isKeyDown = false;
+    private readonly MacroRunner _runner = new(ex => Logger.LogDebug(ex, "一键宏执行失败"));
+    // 配置和角色识别串行准备，但绝不持有宏生命周期锁；强停可取消排队的准备工作。
+    private readonly SemaphoreSlim _preparationGate = new(1, 1);
     private int _activeMacroPriority = -1;
     private DateTime _lastUpdateTime = DateTime.MinValue;
-
     private CombatScenes? _currentCombatScenes;
-    private Avatar? _lastMacroAvatar;
-    private readonly object _pressedKeysLock = new();
-    private readonly HashSet<string> _pressedKeys = new(StringComparer.OrdinalIgnoreCase);
-    private readonly HashSet<string> _pressedMouseKeys = new(StringComparer.OrdinalIgnoreCase);
 
-    /// <summary>切换云模式前先禁止新宏并等待旧宏结束，在桌面输入防护开启前释放按键。</summary>
-    public async Task SuspendForCloudAsync()
-    {
-        Task? running;
-        CancellationTokenSource? cancellation;
-        lock (_lifecycleLock)
-        {
-            _cloudSuspended = true;
-            _isKeyDown = false;
-            running = _fightTask;
-            cancellation = _cts;
-        }
-        cancellation?.Cancel();
-        try { if (running != null) await running.ConfigureAwait(false); }
-        catch (OperationCanceledException) { }
-        catch (Exception ex)
-        {
-            // 宏自身的失败不能阻断云模式切换；关键是等它真正结束并释放按键。
-            Logger.LogDebug(ex, "等待一键宏结束时出现异常");
-        }
-        finally
-        {
-            ReleasePressedMacroKeys();
-            lock (_lifecycleLock)
-            {
-                if (ReferenceEquals(_cts, cancellation))
-                {
-                    _cts = null;
-                    _fightTask = null;
-                    cancellation?.Dispose();
-                }
-            }
-        }
-    }
+    public bool IsCloudSuspended => _runner.IsCloudSuspended;
 
-    public void ResumeAfterCloud() => _cloudSuspended = false;
+    /// <summary>等待所有宏、技能检测及按键释放完成后，调用方才能开启云输入防护。</summary>
+    public Task SuspendForCloudAsync() => _runner.SuspendForCloudAsync();
+    public void ResumeAfterCloud() => _runner.ResumeAfterCloud();
 
     public void KeyDown()
     {
-        lock (_lifecycleLock)
-        {
-            // 云模式下不启动任何桌面宏；底层输入防护只是丢弃输入，不代表任务已停止。
-            if (_cloudSuspended || TaskContext.Instance().IsCloudWeb) return;
-            KeyDownCore();
-        }
+        if (IsCloudSuspended || TaskContext.Instance().IsCloudWeb || !IsEnabled()) return;
+        MacroMode mode;
+        if (IsHoldOnMode()) mode = MacroMode.Hold;
+        else if (IsHoldFinishMode()) mode = MacroMode.HoldFinish;
+        else if (IsTickMode()) mode = MacroMode.Toggle;
+        else return;
+        _runner.KeyDown(mode, FightAsync);
     }
 
-    private void KeyDownCore()
+    public void KeyUp() => _runner.KeyUp();
+
+    private async Task FightAsync(MacroExecution execution)
     {
-        if (_isKeyDown || !IsEnabled())
+        Avatar? activeAvatar;
+        List<CombatCommand>? commands;
+        await _preparationGate.WaitAsync(execution.ForceToken).ConfigureAwait(false);
+        try
         {
-            return;
-        }
-
-        _isKeyDown = true;
-        if (_activeMacroPriority != TaskContext.Instance().Config.MacroConfig.CombatMacroPriority ||
-            IsAvatarMacrosEdited())
-        {
-            _activeMacroPriority = TaskContext.Instance().Config.MacroConfig.CombatMacroPriority;
-            _avatarMacros = LoadAvatarMacros();
-            Logger.LogInformation("加载一键宏配置完成");
-        }
-
-        if (IsHoldOnMode() || IsHoldFinishMode())
-        {
-            if (_cts == null || _cts.Token.IsCancellationRequested)
+            MacroExecutionScope.Checkpoint();
+            if (_activeMacroPriority != TaskContext.Instance().Config.MacroConfig.CombatMacroPriority || IsAvatarMacrosEdited())
             {
-                _cts = new CancellationTokenSource();
-                _fightTask = FightTask(_cts.Token, IsHoldOnMode());
-                if (!_fightTask.IsCompleted)
+                _activeMacroPriority = TaskContext.Instance().Config.MacroConfig.CombatMacroPriority;
+                _avatarMacros = LoadAvatarMacros();
+                Logger.LogInformation("加载一键宏配置完成");
+            }
+
+            using var imageRegion = CaptureToRectArea();
+            var combatScenes = new CombatScenes();
+            try
+            {
+                combatScenes.InitializeTeam(imageRegion);
+                MacroExecutionScope.Checkpoint();
+                if (combatScenes.CheckTeamInitialized())
                 {
-                    _fightTask.Start();
+                    _currentCombatScenes = combatScenes;
+                }
+                else if (_currentCombatScenes == null)
+                {
+                    Logger.LogError("首次队伍角色识别失败");
+                    return;
+                }
+                else
+                {
+                    Logger.LogWarning("队伍角色识别失败，使用上次识别结果，队伍未切换时无影响");
                 }
             }
-        }
-        else if (IsTickMode())
-        {
-            if (_cts == null || _cts.Token.IsCancellationRequested)
+            finally
             {
-                _cts = new CancellationTokenSource();
-                _fightTask = FightTask(_cts.Token, false);
-                if (!_fightTask.IsCompleted)
-                {
-                    _fightTask.Start();
-                }
+                if (!ReferenceEquals(combatScenes, _currentCombatScenes)) combatScenes.Dispose();
             }
-            else
-            {
-                _cts.Cancel();
-            }
-        }
-    }
 
-    public void KeyUp()
-    {
-        _isKeyDown = false;
-        // 云模式或挂起期间仍要执行取消与释放，避免残留按下状态；只是不再启动新宏。
-        if (!IsEnabled() && !_cloudSuspended)
+            var avatarName = _currentCombatScenes.CurrentAvatar(true, imageRegion, execution.ForceToken);
+            activeAvatar = avatarName == null ? null : _currentCombatScenes.SelectAvatar(avatarName);
+            if (activeAvatar == null)
+            {
+                Logger.LogError("无法识别出战角色");
+                return;
+            }
+            if (_avatarMacros == null || !_avatarMacros.TryGetValue(activeAvatar.Name, out commands))
+            {
+                Logger.LogWarning("→ {Name}配置[{Priority}]为空，请先配置一键宏", activeAvatar.Name, _activeMacroPriority);
+                return;
+            }
+        }
+        finally
         {
-            return;
+            _preparationGate.Release();
         }
 
-        if (_cloudSuspended || IsHoldOnMode() || IsHoldFinishMode())
+        try
         {
-            _cts?.Cancel();
-            if (_cloudSuspended || IsHoldOnMode())
+            execution.RunRounds(commands, IsEnabled, (command, round) =>
             {
-                // 新一键宏允许指令保持按下状态，松开热键时需要立即释放残留按键。
-                ReleasePressedMacroKeys();
-            }
+                if (command.ActivatingRound is { Count: > 0 } && !command.ActivatingRound.Contains(round)) return;
+                ExecuteCommand(execution, activeAvatar, command);
+            }, round => Logger.LogInformation("→ {Name}执行宏 (第{Round}轮)", activeAvatar.Name, round));
+        }
+        finally
+        {
+            Logger.LogInformation("→ {Name}停止宏", activeAvatar.Name);
         }
     }
 
-    // public void Run()
-    // {
-    //     if (!IsEnabled())
-    //     {
-    //         return;
-    //     }
-    //     _avatarMacros ??= LoadAvatarMacros();
-    //
-    //     if (IsHoldOnMode())
-    //     {
-    //         if (_fightTask == null || _fightTask.IsCompleted)
-    //         {
-    //             _fightTask = FightTask(_cts);
-    //             _fightTask.Start();
-    //         }
-    //         Thread.Sleep(100);
-    //     }
-    //     else if (IsTickMode())
-    //     {
-    //         if (_cts.Token.IsCancellationRequested)
-    //         {
-    //             _cts = new CancellationTokenSource();
-    //             Task.Run(() => FightTask(_cts));
-    //         }
-    //         else
-    //         {
-    //             _cts.Cancel();
-    //         }
-    //     }
-    // }
-
-    /// <summary>
-    /// 循环执行战斗宏
-    /// </summary>
-    private Task FightTask(CancellationToken ct, bool releasePressedKeysOnStop)
+    // 三种模式都拥有自己的输入账本；释放与发送按下串行，避免松键后再次记入残留输入。
+    private static void ExecuteCommand(MacroExecution execution, Avatar avatar, CombatCommand command)
     {
-        var imageRegion = CaptureToRectArea();
-        var combatScenes = new CombatScenes().InitializeTeam(imageRegion);
-        if (!combatScenes.CheckTeamInitialized())
+        if (command.Method == Method.KeyDown)
         {
-            if (_currentCombatScenes == null)
-            {
-                Logger.LogError("首次队伍角色识别失败");
-                return Task.CompletedTask;
-            }
-            else
-            {
-                Logger.LogWarning("队伍角色识别失败，使用上次识别结果，队伍未切换时无影响");
-            }
+            var key = command.Args![0];
+            execution.InputDown("key:" + key, () => command.Execute(avatar), () => avatar.KeyUp(key));
+        }
+        else if (command.Method == Method.KeyUp)
+        {
+            execution.InputUp("key:" + command.Args![0], () => command.Execute(avatar));
+        }
+        else if (command.Method == Method.MouseDown)
+        {
+            var key = command.Args is { Count: > 0 } ? command.Args[0] : "left";
+            execution.InputDown("mouse:" + key, () => command.Execute(avatar), () => avatar.MouseUp(key));
+        }
+        else if (command.Method == Method.MouseUp)
+        {
+            var key = command.Args is { Count: > 0 } ? command.Args[0] : "left";
+            execution.InputUp("mouse:" + key, () => command.Execute(avatar));
         }
         else
         {
-            _currentCombatScenes = combatScenes;
-        }
-
-        // 找到出战角色
-        // var activeAvatar = _currentCombatScenes.GetAvatars().First(avatar => avatar.IsActive(imageRegion));
-        var avatarName = _currentCombatScenes.CurrentAvatar(true, imageRegion, ct);
-        if (avatarName is null)
-        {
-            Logger.LogError("无法识别出战角色");
-            return Task.CompletedTask;
-        }
-
-        var activeAvatar = _currentCombatScenes.SelectAvatar(avatarName);
-        if (activeAvatar is null)
-        {
-            Logger.LogError("获取出战角色{Name}失败", avatarName);
-            return Task.CompletedTask;
-        }
-        if (releasePressedKeysOnStop)
-        {
-            // 新一键宏停止时要用同一个角色对象补发 KeyUp/MouseUp。
-            _lastMacroAvatar = activeAvatar;
-        }
-
-        if (_avatarMacros != null && _avatarMacros.TryGetValue(activeAvatar.Name, out var combatCommands))
-        {
-            if (!releasePressedKeysOnStop)
-            {
-                return new Task(() =>
-                {
-                    var round = 1;
-                    while (!ct.IsCancellationRequested && IsEnabled())
-                    {
-                        Logger.LogInformation("→ {Name}执行宏 (第{Round}轮)", activeAvatar.Name, round);
-                        if ((IsHoldOnMode() || IsHoldFinishMode()) && !_isKeyDown)
-                        {
-                            break;
-                        }
-
-                        // 通用化战斗策略
-                        foreach (var command in combatCommands)
-                        {
-                            if (command.ActivatingRound != null && command.ActivatingRound.Count > 0 && !command.ActivatingRound.Contains(round))
-                            {
-                                // 跳过强制首轮指令
-                                continue;
-                            }
-                            command.Execute(activeAvatar);
-                        }
-                        round++;
-                    }
-
-                    Logger.LogInformation("→ {Name}停止宏", activeAvatar.Name);
-                });
-            }
-
-            // 新一键宏会追踪宏内按下的键，避免取消任务后键盘或鼠标状态残留。
-            return new Task(() =>
-            {
-                try
-                {
-                    var round = 1;
-                    while (!ct.IsCancellationRequested && IsEnabled())
-                    {
-                        Logger.LogInformation("→ {Name}执行宏 (第{Round}轮)", activeAvatar.Name, round);
-                        if ((IsHoldOnMode() || IsHoldFinishMode()) && !_isKeyDown)
-                        {
-                            break;
-                        }
-
-                        // 通用化战斗策略
-                        foreach (var command in combatCommands)
-                        {
-                            if (releasePressedKeysOnStop && (ct.IsCancellationRequested || !_isKeyDown))
-                            {
-                                // 新一键宏松开热键后不再继续执行后续指令，直接进入 finally 释放按键。
-                                break;
-                            }
-
-                            if (command.ActivatingRound != null && command.ActivatingRound.Count > 0 && !command.ActivatingRound.Contains(round))
-                            {
-                                // 跳过强制首轮指令
-                                continue;
-                            }
-                            ExecuteCommand(activeAvatar, command);
-                        }
-                        round++;
-                    }
-                }
-                finally
-                {
-                    if (releasePressedKeysOnStop)
-                    {
-                        ReleasePressedMacroKeys(activeAvatar);
-                    }
-
-                    Logger.LogInformation("→ {Name}停止宏", activeAvatar.Name);
-                }
-            });
-        }
-        else
-        {
-            Logger.LogWarning("→ {Name}配置[{Priority}]为空，请先配置一键宏", activeAvatar.Name, _activeMacroPriority);
-            return Task.CompletedTask;
+            command.Execute(avatar);
         }
     }
 
@@ -318,146 +155,32 @@ public class OneKeyFightTask : Singleton<OneKeyFightTask>
         var json = File.ReadAllText(jsonPath);
         _lastUpdateTime = File.GetLastWriteTime(jsonPath);
         var avatarMacros = JsonSerializer.Deserialize<List<AvatarMacro>>(json, ConfigService.JsonOptions);
-        if (avatarMacros == null)
-        {
-            return [];
-        }
+        if (avatarMacros == null) return [];
 
         var result = new Dictionary<string, List<CombatCommand>>();
         foreach (var avatarMacro in avatarMacros)
         {
             var commands = avatarMacro.LoadCommands();
-            if (commands != null)
-            {
-                result.Add(avatarMacro.Name, commands);
-            }
+            if (commands != null) result.Add(avatarMacro.Name, commands);
         }
-
         return result;
     }
 
     public bool IsAvatarMacrosEdited()
     {
-        // 通过修改时间判断是否编辑过
         var jsonPath = GetAvatarMacroJsonPath();
-        var lastWriteTime = File.GetLastWriteTime(jsonPath);
-        return lastWriteTime > _lastUpdateTime;
+        return File.GetLastWriteTime(jsonPath) > _lastUpdateTime;
     }
-    
+
     public static string GetAvatarMacroJsonPath()
     {
         var path = Global.Absolute("User/avatar_macro.json");
-        if (!File.Exists(path))
-        {
-            File.Copy(Global.Absolute("User/avatar_macro_default.json"), path);
-        }
+        if (!File.Exists(path)) File.Copy(Global.Absolute("User/avatar_macro_default.json"), path);
         return path;
     }
 
-    public static bool IsEnabled()
-    {
-        return TaskContext.Instance().Config.MacroConfig.CombatMacroEnabled;
-    }
-
-    public static bool IsHoldOnMode()
-    {
-        return TaskContext.Instance().Config.MacroConfig.CombatMacroHotkeyMode == HoldOnMode;
-    }
-
-    public static bool IsHoldFinishMode()
-    {
-        return TaskContext.Instance().Config.MacroConfig.CombatMacroHotkeyMode == HoldFinishMode;
-    }
-
-    public static bool IsTickMode()
-    {
-        return TaskContext.Instance().Config.MacroConfig.CombatMacroHotkeyMode == TickMode;
-    }
-
-    /// 新一键宏执行指令时记录按下状态，便于停止时释放未抬起的键。
-    private void ExecuteCommand(Avatar avatar, CombatCommand command)
-    {
-        command.Execute(avatar);
-
-        if (command.Method == Method.KeyDown)
-        {
-            TrackPressedKey(command.Args![0]);
-        }
-        else if (command.Method == Method.KeyUp)
-        {
-            TrackReleasedKey(command.Args![0]);
-        }
-        else if (command.Method == Method.MouseDown)
-        {
-            TrackPressedMouseKey(command.Args is { Count: > 0 } ? command.Args[0] : "left");
-        }
-        else if (command.Method == Method.MouseUp)
-        {
-            TrackReleasedMouseKey(command.Args is { Count: > 0 } ? command.Args[0] : "left");
-        }
-    }
-
-    private void TrackPressedKey(string key)
-    {
-        lock (_pressedKeysLock)
-        {
-            _pressedKeys.Add(key);
-        }
-    }
-
-    private void TrackReleasedKey(string key)
-    {
-        lock (_pressedKeysLock)
-        {
-            _pressedKeys.Remove(key);
-        }
-    }
-
-    private void TrackPressedMouseKey(string key)
-    {
-        lock (_pressedKeysLock)
-        {
-            _pressedMouseKeys.Add(key);
-        }
-    }
-
-    private void TrackReleasedMouseKey(string key)
-    {
-        lock (_pressedKeysLock)
-        {
-            _pressedMouseKeys.Remove(key);
-        }
-    }
-
-    /// <summary>
-    /// 释放新一键宏记录的键盘和鼠标按下状态。
-    /// </summary>
-    private void ReleasePressedMacroKeys(Avatar? avatar = null)
-    {
-        string[] keys;
-        string[] mouseKeys;
-        lock (_pressedKeysLock)
-        {
-            keys = [.. _pressedKeys];
-            mouseKeys = [.. _pressedMouseKeys];
-            _pressedKeys.Clear();
-            _pressedMouseKeys.Clear();
-        }
-
-        var releaseAvatar = avatar ?? _lastMacroAvatar;
-        if (releaseAvatar == null)
-        {
-            return;
-        }
-
-        foreach (var key in keys)
-        {
-            releaseAvatar.KeyUp(key);
-        }
-
-        foreach (var mouseKey in mouseKeys)
-        {
-            releaseAvatar.MouseUp(mouseKey);
-        }
-    }
+    public static bool IsEnabled() => TaskContext.Instance().Config.MacroConfig.CombatMacroEnabled;
+    public static bool IsHoldOnMode() => TaskContext.Instance().Config.MacroConfig.CombatMacroHotkeyMode == HoldOnMode;
+    public static bool IsHoldFinishMode() => TaskContext.Instance().Config.MacroConfig.CombatMacroHotkeyMode == HoldFinishMode;
+    public static bool IsTickMode() => TaskContext.Instance().Config.MacroConfig.CombatMacroHotkeyMode == TickMode;
 }

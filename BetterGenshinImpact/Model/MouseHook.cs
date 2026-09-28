@@ -1,4 +1,4 @@
-﻿using BetterGenshinImpact.GameTask;
+using BetterGenshinImpact.GameTask;
 using Fischless.HotkeyCapture;
 using Gma.System.MouseKeyHook;
 using System;
@@ -13,81 +13,91 @@ namespace BetterGenshinImpact.Model;
 public class MouseHook
 {
     public static Dictionary<MouseButtons, MouseHook> AllMouseHooks = [];
-
-    public event EventHandler<KeyPressedEventArgs>? MousePressed = null;
-
-    public event EventHandler<KeyPressedEventArgs>? MouseDownEvent = null;
-
-    public event EventHandler<KeyPressedEventArgs>? MouseUpEvent = null;
-
+    public event EventHandler<KeyPressedEventArgs>? MousePressed;
+    public event EventHandler<KeyPressedEventArgs>? MouseDownEvent;
+    public event EventHandler<KeyPressedEventArgs>? MouseUpEvent;
     public bool IsHold { get; set; }
-
     public MouseButtons BindMouse { get; set; } = MouseButtons.Left;
-
-    public bool IsPressed { get; set; }
-
     public string ConfigPropertyName { get; set; } = string.Empty;
 
-    public void MouseDown(object? sender, MouseEventExtArgs e)
+    private volatile bool _isPressed;
+    private int _pressGeneration;
+    private readonly Func<bool> _isGameActive;
+    private readonly Func<string?, bool> _shouldBlockHotkey;
+    private readonly Action<Action> _queueAction;
+
+    public bool IsPressed
     {
-        if (!SystemControl.IsGenshinImpactActive())
+        get => _isPressed;
+        set
         {
-            return;
-        }
-
-        if (e.Button != MouseButtons.Left && e.Button != MouseButtons.None && e.Button == BindMouse)
-        {
-            if (ChatUiHotkeyGuard.ShouldBlockHotkey(ConfigPropertyName))
-            {
-                return;
-            }
-
-            IsPressed = true;
-            MouseDownEvent?.Invoke(this, new KeyPressedEventArgs(User32.HotKeyModifiers.MOD_NONE, Keys.None));
-            if (IsHold)
-            {
-                Task.Run(() => RunAction(e));
-            }
-            else
-            {
-                MousePressed?.Invoke(this, new KeyPressedEventArgs(User32.HotKeyModifiers.MOD_NONE, Keys.None));
-                IsPressed = false;
-            }
+            if (!value) Interlocked.Increment(ref _pressGeneration);
+            _isPressed = value;
         }
     }
 
-    /// <summary>
-    /// 长按持续执行
-    /// </summary>
-    /// <param name="e"></param>
-    private void RunAction(MouseEventExtArgs e)
+    public MouseHook() : this(SystemControl.IsGenshinImpactActive, ChatUiHotkeyGuard.ShouldBlockHotkey) { }
+
+    internal MouseHook(Func<bool> isGameActive, Func<string?, bool> shouldBlockHotkey, Action<Action>? queueAction = null)
+    {
+        _isGameActive = isGameActive;
+        _shouldBlockHotkey = shouldBlockHotkey;
+        _queueAction = queueAction ?? (action => { _ = Task.Run(action); });
+    }
+
+    public void MouseDown(object? sender, MouseEventExtArgs e) => MouseDown(sender, e, false);
+
+    internal void MouseDown(object? sender, MouseEventExtArgs e, bool cloudOnly, Func<bool>? isCurrent = null)
+    {
+        if (!_isGameActive() || e.Button is MouseButtons.Left or MouseButtons.None || e.Button != BindMouse
+            || HotKeySettingModel.ShouldBlockCloudHotkey(ConfigPropertyName, cloudOnly)
+            || (!cloudOnly && _shouldBlockHotkey(ConfigPropertyName)) || isCurrent?.Invoke() == false) return;
+
+        var generation = Volatile.Read(ref _pressGeneration);
+        IsPressed = true;
+        MouseDownEvent?.Invoke(this, new KeyPressedEventArgs(User32.HotKeyModifiers.MOD_NONE, Keys.None));
+        if (!IsCurrentPress(generation) || isCurrent?.Invoke() == false) return;
+        if (IsHold && !cloudOnly)
+        {
+            _queueAction(() => RunAction(generation, isCurrent));
+        }
+        else
+        {
+            try { MousePressed?.Invoke(this, new KeyPressedEventArgs(User32.HotKeyModifiers.MOD_NONE, Keys.None)); }
+            finally { IsPressed = false; }
+        }
+    }
+
+    private bool IsCurrentPress(int generation) => IsPressed && generation == Volatile.Read(ref _pressGeneration);
+
+    private void RunAction(int generation, Func<bool>? isCurrent)
     {
         lock (this)
         {
-            while (IsPressed)
+            while (IsCurrentPress(generation) && isCurrent?.Invoke() != false)
             {
-                if (ChatUiHotkeyGuard.ShouldBlockHotkey(ConfigPropertyName))
+                if (_shouldBlockHotkey(ConfigPropertyName))
                 {
                     Thread.Sleep(10);
                     continue;
                 }
-
                 MousePressed?.Invoke(this, new KeyPressedEventArgs(User32.HotKeyModifiers.MOD_NONE, Keys.None));
             }
         }
     }
 
-    public void MouseUp(object? sender, MouseEventExtArgs e)
+    public void MouseUp(object? sender, MouseEventExtArgs e) => MouseUp(sender, e, false);
+
+    internal void MouseUp(object? sender, MouseEventExtArgs e, bool cloudOnly, Func<bool>? isCurrent = null)
     {
-        if (e.Button != MouseButtons.Left && e.Button != MouseButtons.None && e.Button == BindMouse)
-        {
-            IsPressed = false;
-            if (SystemControl.IsGenshinImpactActive() && !ChatUiHotkeyGuard.ShouldBlockHotkey(ConfigPropertyName))
-            {
-                MouseUpEvent?.Invoke(this, new KeyPressedEventArgs(User32.HotKeyModifiers.MOD_NONE, Keys.None));
-            }
-        }
+        if (e.Button is MouseButtons.Left or MouseButtons.None || e.Button != BindMouse) return;
+        ResetPressedState();
+        if (_isGameActive() && !HotKeySettingModel.ShouldBlockCloudHotkey(ConfigPropertyName, cloudOnly)
+            && (cloudOnly || !_shouldBlockHotkey(ConfigPropertyName)) && isCurrent?.Invoke() != false)
+            MouseUpEvent?.Invoke(this, new KeyPressedEventArgs(User32.HotKeyModifiers.MOD_NONE, Keys.None));
     }
+
+    internal void ResetPressedState() => IsPressed = false;
 
     public void RegisterHotKey(MouseButtons mouseButton)
     {
@@ -97,13 +107,11 @@ public class MouseHook
 
     public void UnregisterHotKey()
     {
-        IsPressed = false;
+        ResetPressedState();
         IsHold = false;
-        AllMouseHooks.Remove(BindMouse);
+        if (AllMouseHooks.TryGetValue(BindMouse, out var hook) && ReferenceEquals(hook, this))
+            AllMouseHooks.Remove(BindMouse);
     }
 
-    public void Dispose()
-    {
-        UnregisterHotKey();
-    }
+    public void Dispose() => UnregisterHotKey();
 }
